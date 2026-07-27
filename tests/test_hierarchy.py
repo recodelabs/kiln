@@ -185,3 +185,31 @@ def test_descendant_of_orphaned_ancestor_resolves_normally():
 
     # Only one orphan issue (for the directly orphaned node)
     assert report.counts().get("orphan") == 1
+
+
+def test_max_depth_boundary():
+    """Verify nodes at and around MAX_DEPTH=12 boundary resolve or fail correctly.
+
+    With MAX_DEPTH=12, a chain of N nodes has depth N-1. Chains up to
+    length 12 resolve (depths 0..11); chains longer than 12 fail with
+    too_deep. This documents the exact boundary behavior.
+    """
+    report = Report()
+    # Create a chain n0..n15 (16 nodes total)
+    locations = [loc("n0")] + [loc(f"n{i}", parent=f"n{i - 1}") for i in range(1, 16)]
+
+    info = resolve_hierarchy(locations, report)
+
+    # Nodes n0..n11 should resolve (chain lengths 1..12 nodes, depths 0..11)
+    for i in range(12):
+        node_id = f"n{i}"
+        assert node_id in info, f"{node_id} should resolve"
+        assert info[node_id].depth == i, f"{node_id} should have depth {i}"
+
+    # Nodes n12..n15 should be excluded (chain lengths 13..16, exceed MAX_DEPTH)
+    for i in range(12, 16):
+        node_id = f"n{i}"
+        assert node_id not in info, f"{node_id} should be excluded (too_deep)"
+
+    # Exactly 4 too_deep issues (one for each node past the boundary)
+    assert report.counts()["too_deep"] == 4

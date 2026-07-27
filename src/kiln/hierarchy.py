@@ -37,14 +37,20 @@ class _CycleError(Exception):
 
 
 class _TooDeepError(Exception):
-    def __init__(self, path: list[str], deep_node: str) -> None:
+    def __init__(self, path: list[str]) -> None:
         super().__init__(" -> ".join(path))
         self.path = path
-        self.deep_node = deep_node
 
 
-def _chain(location_id: str, by_id: dict[str, RawLocation]) -> list[str]:
+def _chain(
+    location_id: str,
+    by_id: dict[str, RawLocation],
+    cache: dict[str, list[str]],
+) -> list[str]:
     """Ids from root to `location_id` inclusive."""
+    if location_id in cache:
+        return cache[location_id]
+
     walked: list[str] = []
     seen: set[str] = set()
     current = location_id
@@ -56,7 +62,7 @@ def _chain(location_id: str, by_id: dict[str, RawLocation]) -> list[str]:
         walked.append(current)
 
         if len(walked) > MAX_DEPTH:
-            raise _TooDeepError(walked, location_id)
+            raise _TooDeepError(walked)
 
         parent_id = by_id[current].parent_id
         if parent_id is None:
@@ -67,6 +73,7 @@ def _chain(location_id: str, by_id: dict[str, RawLocation]) -> list[str]:
         current = parent_id
 
     walked.reverse()
+    cache[location_id] = walked
     return walked
 
 
@@ -79,6 +86,7 @@ def resolve_hierarchy(
     """
     by_id = {location.id: location for location in locations}
     resolved: dict[str, HierarchyInfo] = {}
+    chain_cache: dict[str, list[str]] = {}
 
     # Pre-walk: Report all dangling parents exactly once
     for location in locations:
@@ -91,7 +99,7 @@ def resolve_hierarchy(
 
     for location in locations:
         try:
-            chain = _chain(location.id, by_id)
+            chain = _chain(location.id, by_id, chain_cache)
         except _CycleError as exc:
             if exc.cycle_node == location.id:
                 report.add("cycle", location.id, " -> ".join(exc.path))
@@ -103,19 +111,17 @@ def resolve_hierarchy(
                 )
             continue
         except _TooDeepError as exc:
-            if exc.deep_node == location.id:
-                report.add(
-                    "too_deep",
-                    location.id,
-                    f"chain exceeds MAX_DEPTH={MAX_DEPTH}: "
-                    + " -> ".join(exc.path),
-                )
-            else:
-                report.add(
-                    "unreachable_ancestor",
-                    location.id,
-                    f"ancestor {exc.deep_node} exceeds MAX_DEPTH",
-                )
+            # Unlike cycles, depth is a property of the node itself. In a
+            # chain n0..n19 with MAX_DEPTH=12, every node from n12 onward
+            # has an over-long chain from itself to the root — each is
+            # independently too deep. There are no collateral victims
+            # distinguished from guilty parties, so no unreachable_ancestor
+            # distinction is needed.
+            report.add(
+                "too_deep",
+                location.id,
+                f"chain exceeds MAX_DEPTH={MAX_DEPTH}: " + " -> ".join(exc.path),
+            )
             continue
 
         admin_chain = [
