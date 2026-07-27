@@ -4,10 +4,12 @@ import os
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 import shapely
 
+from kiln.frame import ARROW_LIST_TYPES, INTEGER_COLUMNS, STRING_COLUMNS
 from kiln.report import Report
 from kiln.write import GdalUnavailable, PartitionWriteError, _finalize, probe_gdal, write_dataset
 
@@ -169,3 +171,54 @@ def test_a_cross_filesystem_replace_is_reported_and_cleaned_up(tmp_path, monkeyp
     assert "country=NG/geom_type=point/tier=site" in str(excinfo.value)
     assert list(tmp_path.rglob("*.parquet")) == []
     assert not (tmp_path / "locations").exists()
+
+
+def test_null_optional_columns_survive_the_full_write_path(tmp_path):
+    """A uniformly-null column must not be silently dropped by ogr2ogr.
+
+    GDAL's Parquet driver drops any column that Arrow infers as the `null`
+    type, which happens whenever every value in a column is null. Because
+    partitions are narrow, an individual partition file is exactly where an
+    optional column goes all-null. frame.py's explicit "string" / "Int64" /
+    pd.ArrowDtype(...) dtypes -- not plain object dtype -- are what keep
+    GDAL from dropping it; this guards that the two-pass geopandas/ogr2ogr
+    write actually preserves that end to end.
+    """
+    n = 150
+    rng = np.random.default_rng(0)
+    points = [shapely.Point(x, y) for x, y in rng.random((n, 2)) * 10]
+
+    rows = [
+        {
+            "id": f"p{i}",
+            "country": "NG",
+            "geom_type": "point",
+            "tier": "site",
+            "gers_id": None,
+            "settlement_type": None,
+            "admin_level": None,
+            "identifiers": None,
+            "ancestor_ids": None,
+            "overlays_admin_unit_ids": None,
+        }
+        for i in range(n)
+    ]
+    frame = gpd.GeoDataFrame(rows, geometry=points, crs="EPSG:4326")
+
+    # Apply exactly the dtype scheme frame.py applies to a real frame, not a
+    # lookalike, so this exercises the actual invariant Task 5 established.
+    for col in ("id", "country", "geom_type", "tier", "gers_id", "settlement_type"):
+        assert col in STRING_COLUMNS
+        frame[col] = frame[col].astype("string")
+    assert "admin_level" in INTEGER_COLUMNS
+    frame["admin_level"] = frame["admin_level"].astype("Int64")
+    for col, arrow_type in ARROW_LIST_TYPES.items():
+        frame[col] = frame[col].astype(pd.ArrowDtype(arrow_type))
+
+    write_dataset(frame, tmp_path, Report())
+    target = next(tmp_path.rglob("*.parquet"))
+
+    # schema_arrow, not schema: ParquetSchema.names flattens nested
+    # list/struct leaves and would mislead on the list columns here.
+    written_columns = set(pq.ParquetFile(target).schema_arrow.names)
+    assert set(frame.columns) <= written_columns
