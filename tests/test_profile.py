@@ -2,8 +2,11 @@ import base64
 
 from kiln.profile import (
     BOUNDARY_EXTENSION_URL,
+    DELIVERY_STRATEGY_EXTENSION_URL,
     GERS_SYSTEM,
+    OVERLAYS_EXTENSION_URL,
     PCODE_SYSTEM,
+    SETTLEMENT_TYPE_EXTENSION_URL,
     shred,
 )
 from kiln.report import Report
@@ -124,12 +127,6 @@ def test_shred_rejects_a_boundary_with_the_wrong_content_type():
 
 
 def test_shred_collects_overlays_settlement_type_and_delivery_strategy():
-    from kiln.profile import (
-        DELIVERY_STRATEGY_EXTENSION_URL,
-        OVERLAYS_EXTENSION_URL,
-        SETTLEMENT_TYPE_EXTENSION_URL,
-    )
-
     resource = a_location(
         extension=[
             {"url": OVERLAYS_EXTENSION_URL, "valueReference": {"reference": "Location/a"}},
@@ -153,3 +150,131 @@ def test_shred_reports_and_skips_a_resource_with_no_id():
 
     assert shred(resource, report) is None
     assert report.counts() == {"missing_id": 1}
+
+
+def test_shred_guards_against_non_dict_partof():
+    """Non-dict partOf should be skipped, not raise."""
+    report = Report()
+    resource = a_location(partOf="not-a-dict")
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.parent_id is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_dict_meta():
+    """Non-dict meta should be skipped, not raise."""
+    report = Report()
+    resource = a_location(meta="not-a-dict")
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.last_updated is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_dict_extension_entry():
+    """Non-dict extension entry should be skipped, not raise."""
+    report = Report()
+    resource = a_location(
+        extension=[
+            {"url": "http://example.org/some-ext", "valueCode": "test"},
+            "not-a-dict",
+        ]
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_dict_identifier_entry():
+    """Non-dict identifier entry should be skipped, not raise."""
+    report = Report()
+    resource = a_location(
+        identifier=[
+            {"system": PCODE_SYSTEM, "value": "NG001002"},
+            "not-a-dict",
+        ]
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.pcode == "NG001002"
+    assert len(raw.identifiers) == 1
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_numeric_position_longitude():
+    """Non-numeric position.longitude should be skipped with report, not raise."""
+    report = Report()
+    resource = a_location(position={"longitude": "not-a-number", "latitude": 12.0})
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.position is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_numeric_position_latitude():
+    """Non-numeric position.latitude should be skipped with report, not raise."""
+    report = Report()
+    resource = a_location(position={"longitude": 8.5, "latitude": "not-a-number"})
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.position is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_dict_boundary_valueattachment():
+    """Non-dict boundary valueAttachment should be skipped with report."""
+    report = Report()
+    resource = a_location(
+        extension=[
+            {
+                "url": BOUNDARY_EXTENSION_URL,
+                "valueAttachment": "not-a-dict",
+            }
+        ]
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.boundary is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_dict_overlays_valuereference():
+    """Non-dict overlays valueReference should be skipped with report."""
+    report = Report()
+    resource = a_location(
+        extension=[
+            {
+                "url": OVERLAYS_EXTENSION_URL,
+                "valueReference": "not-a-dict",
+            }
+        ]
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.overlays_admin_unit_ids == []
+    assert report.counts() == {"malformed_field": 1}

@@ -79,13 +79,21 @@ def _strip_reference(reference: str | None) -> str | None:
 
 def _identifier_value(identifiers: list[dict], system: str) -> str | None:
     for identifier in identifiers:
-        if identifier.get("system") == system:
+        if isinstance(identifier, dict) and identifier.get("system") == system:
             return identifier.get("value")
     return None
 
 
 def _read_boundary(extension: dict, location_id: str, report) -> BoundaryRef | None:
-    attachment = extension.get("valueAttachment") or {}
+    value_attachment = extension.get("valueAttachment")
+    if not isinstance(value_attachment, dict):
+        report.add(
+            "malformed_field",
+            location_id,
+            "boundary extension valueAttachment is not a dict",
+        )
+        return None
+    attachment = value_attachment
     content_type = attachment.get("contentType")
     if content_type != GEOJSON_CONTENT_TYPE:
         report.add(
@@ -124,7 +132,44 @@ def shred(resource: dict, report) -> RawLocation | None:
         longitude, latitude = pos.get("longitude"), pos.get("latitude")
         if longitude is not None and latitude is not None:
             # FHIR is longitude-first. x = longitude, y = latitude.
-            position = (float(longitude), float(latitude))
+            try:
+                position = (float(longitude), float(latitude))
+            except (TypeError, ValueError):
+                report.add(
+                    "malformed_field",
+                    location_id,
+                    f"position coordinates not numeric: ({longitude!r}, {latitude!r})",
+                )
+
+    # Extract parent_id, guarding against non-dict partOf
+    parent_id = None
+    part_of = resource.get("partOf")
+    if part_of is not None:
+        if isinstance(part_of, dict):
+            parent_id = _strip_reference(part_of.get("reference"))
+        else:
+            report.add("malformed_field", location_id, "partOf is not a dict")
+
+    # Extract last_updated, guarding against non-dict meta
+    last_updated = None
+    meta = resource.get("meta")
+    if meta is not None:
+        if isinstance(meta, dict):
+            last_updated = meta.get("lastUpdated")
+        else:
+            report.add("malformed_field", location_id, "meta is not a dict")
+
+    # Build identifiers list, guarding against non-dict entries
+    identifiers_list = []
+    for i, identifier in enumerate(identifiers):
+        if not isinstance(identifier, dict):
+            report.add(
+                "malformed_field",
+                location_id,
+                f"identifier[{i}] is not a dict",
+            )
+            continue
+        identifiers_list.append({"system": identifier.get("system"), "value": identifier.get("value")})
 
     raw = RawLocation(
         id=location_id,
@@ -134,22 +179,31 @@ def shred(resource: dict, report) -> RawLocation | None:
         physical_type=_first_coding_code(resource.get("physicalType")),
         pcode=_identifier_value(identifiers, PCODE_SYSTEM),
         gers_id=_identifier_value(identifiers, GERS_SYSTEM),
-        identifiers=[
-            {"system": i.get("system"), "value": i.get("value")} for i in identifiers
-        ],
-        parent_id=_strip_reference((resource.get("partOf") or {}).get("reference")),
+        identifiers=identifiers_list,
+        parent_id=parent_id,
         position=position,
-        last_updated=(resource.get("meta") or {}).get("lastUpdated"),
+        last_updated=last_updated,
     )
 
     for extension in resource.get("extension") or []:
+        if not isinstance(extension, dict):
+            report.add("malformed_field", location_id, "extension entry is not a dict")
+            continue
         url = extension.get("url")
         if url == BOUNDARY_EXTENSION_URL and raw.boundary is None:
             raw.boundary = _read_boundary(extension, location_id, report)
         elif url == OVERLAYS_EXTENSION_URL:
-            target = _strip_reference((extension.get("valueReference") or {}).get("reference"))
-            if target:
-                raw.overlays_admin_unit_ids.append(target)
+            value_reference = extension.get("valueReference")
+            if isinstance(value_reference, dict):
+                target = _strip_reference(value_reference.get("reference"))
+                if target:
+                    raw.overlays_admin_unit_ids.append(target)
+            elif value_reference is not None:
+                report.add(
+                    "malformed_field",
+                    location_id,
+                    "overlays extension valueReference is not a dict",
+                )
         elif url == SETTLEMENT_TYPE_EXTENSION_URL:
             raw.settlement_type = extension.get("valueCode")
         elif url == DELIVERY_STRATEGY_EXTENSION_URL:
