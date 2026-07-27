@@ -1,4 +1,10 @@
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
 import geopandas as gpd
+import pytest
 
 from kiln.frame import build_frame
 from kiln.profile import BoundaryRef, RawLocation
@@ -105,3 +111,78 @@ def test_nodes_excluded_by_the_hierarchy_are_absent_from_the_frame():
     frame = build_frame(locations, Report())
 
     assert frame.empty
+
+
+def test_empty_frame_has_same_columns_as_populated_frame():
+    populated = build_frame(tree(), Report())
+    empty = build_frame([], Report())
+
+    assert set(populated.columns) == set(empty.columns)
+    # Verify dtypes match too (except geometry which is special)
+    for col in populated.columns:
+        if col != "geometry":
+            assert populated[col].dtype == empty[col].dtype, \
+                f"Column {col}: populated={populated[col].dtype}, " \
+                f"empty={empty[col].dtype}"
+
+
+def test_all_null_columns_survive_parquet_round_trip_through_ogr2ogr():
+    # Build a frame where some columns are entirely null to test dtype preservation
+    report = Report()
+    locations = [
+        RawLocation(
+            id="test1",
+            name="Test 1",
+            loc_type="facility",
+            parent_id="ng",
+            position=(3.5, 6.5),
+            # Deliberately omit status, physical_type, gers_id, settlement_type,
+            # delivery_strategy to test null columns
+        ),
+        RawLocation(
+            id="test2",
+            name="Test 2",
+            loc_type="facility",
+            parent_id="ng",
+            position=(3.6, 6.6),
+        ),
+    ]
+
+    frame = build_frame(locations, report)
+
+    # Skip if ogr2ogr is not available
+    ogr2ogr = shutil.which("ogr2ogr")
+    if not ogr2ogr:
+        pytest.skip("ogr2ogr not found on PATH")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        input_parquet = tmpdir_path / "input.parquet"
+        output_parquet = tmpdir_path / "output.parquet"
+
+        # Write to parquet
+        frame.to_parquet(input_parquet, index=False)
+
+        # Run ogr2ogr
+        try:
+            subprocess.run([
+                ogr2ogr,
+                "-f", "Parquet",
+                str(output_parquet),
+                str(input_parquet),
+                "-lco", "USE_PARQUET_GEO_TYPES=YES",
+                "-lco", "WRITE_COVERING_BBOX=YES",
+                "-lco", "SORT_BY_BBOX=NO",
+            ], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            pytest.fail(f"ogr2ogr failed: {e.stderr}")
+
+        # Read back and verify string/int columns with dtypes survived
+        # (list columns are dropped by GDAL, which is acceptable)
+        result = gpd.read_parquet(output_parquet)
+        preserved_cols = (set(frame.columns)
+                          - {"identifiers", "ancestor_ids",
+                             "overlays_admin_unit_ids"})
+        missing = preserved_cols - set(result.columns)
+        assert not missing, f"Columns missing after ogr2ogr: {missing}"
+        assert len(result) == len(frame)
