@@ -165,23 +165,20 @@ def test_geometry_collection_input_is_reported_and_dropped():
     assert report.counts() == {"geometry_unexpected_type": 1}
 
 
-def test_degenerate_geometry_that_becomes_linestring_is_reported():
+def test_degenerate_polygon_with_duplicate_points_becomes_linestring():
     report = Report()
-    # A very thin/degenerate polygon that may become a LineString after make_valid
-    # Using a bowtie that when repaired might result in unexpected geometry
-    thin_polygon = (
-        b'{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,0.0001],[0,0.0001],'
-        b"[0,0]]]}"
+    # A polygon with duplicate points that becomes a LineString after make_valid
+    degenerate_polygon = (
+        b'{"type":"Polygon","coordinates":[[[0,0],[1,1],[1,1],[1,1],[0,0]]]}'
     )
 
     result = build_geometry(
-        RawLocation(id="j", boundary=BoundaryRef(data=thin_polygon)), report
+        RawLocation(id="j", boundary=BoundaryRef(data=degenerate_polygon)), report
     )
 
-    # If make_valid produces something other than Point/Polygon/MultiPolygon,
-    # it should be reported
-    if result.geometry is None:
-        assert "geometry_unexpected_type" in report.counts()
-    else:
-        # If it's still valid, ensure it's a polygon or point
-        assert result.geometry.geom_type in {"Point", "Polygon", "MultiPolygon"}
+    assert result.geometry is None
+    assert result.geom_type is None
+    # Should have both geometry_repaired and geometry_unexpected_type reports
+    counts = report.counts()
+    assert counts["geometry_repaired"] == 1
+    assert counts["geometry_unexpected_type"] == 1

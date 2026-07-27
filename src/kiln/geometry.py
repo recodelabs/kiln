@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 
 import shapely
+import shapely.errors
 
 from kiln.profile import RawLocation
 from kiln.report import Report
@@ -64,7 +65,7 @@ def normalize_geojson(payload: bytes, location_id: str, report: Report):
             ]
             try:
                 return shapely.union_all(parts)
-            except Exception as exc:  # noqa: BLE001 topology errors
+            except shapely.errors.GEOSException as exc:
                 report.add("boundary_unparseable", location_id, f"union failed: {exc}")
                 return None
         return _from_dict(geometries[0], location_id, report)
