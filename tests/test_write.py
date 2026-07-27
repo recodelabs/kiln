@@ -7,7 +7,7 @@ import pytest
 import shapely
 
 from kiln.report import Report
-from kiln.write import GdalUnavailable, probe_gdal, write_dataset
+from kiln.write import GdalUnavailable, PartitionWriteError, _finalize, probe_gdal, write_dataset
 
 
 @pytest.fixture(autouse=True)
@@ -122,3 +122,28 @@ def test_an_empty_frame_writes_nothing_and_does_not_raise(tmp_path):
     empty = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
     assert write_dataset(empty, tmp_path, Report()) == []
+
+
+def test_a_failed_partition_raises_with_partition_and_stderr_and_leaves_no_file(tmp_path):
+    # A source file that does not exist forces ogr2ogr to fail before it
+    # writes anything, which is an easy, deterministic way to exercise the
+    # failure path without depending on any particular data shape.
+    bogus_source = tmp_path / "does-not-exist.parquet"
+    destination = (
+        tmp_path / "out" / "country=NG" / "geom_type=point" / "tier=site" / "part-0.parquet"
+    )
+
+    with pytest.raises(PartitionWriteError) as excinfo:
+        _finalize(
+            bogus_source,
+            destination,
+            row_group_size=1000,
+            geo_types="both",
+            partition="country=NG/geom_type=point/tier=site",
+        )
+
+    message = str(excinfo.value)
+    assert "country=NG/geom_type=point/tier=site" in message
+    assert "does-not-exist.parquet" in message  # GDAL's stderr names the missing input
+    assert not destination.exists()
+    assert not destination.parent.exists()
