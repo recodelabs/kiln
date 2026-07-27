@@ -1,0 +1,124 @@
+import json
+
+import geopandas as gpd
+import numpy as np
+import pyarrow.parquet as pq
+import pytest
+import shapely
+
+from kiln.report import Report
+from kiln.write import GdalUnavailable, probe_gdal, write_dataset
+
+
+@pytest.fixture(autouse=True)
+def require_gdal():
+    try:
+        probe_gdal()
+    except GdalUnavailable as exc:
+        pytest.skip(str(exc))
+
+
+def a_frame(n_points=250, n_polygons=250) -> gpd.GeoDataFrame:
+    rng = np.random.default_rng(0)
+    points = [shapely.Point(x, y) for x, y in rng.random((n_points, 2)) * 10]
+    polygons = [shapely.box(x, y, x + 0.1, y + 0.1) for x, y in rng.random((n_polygons, 2)) * 10]
+    rows = (
+        [{"id": f"p{i}", "country": "NG", "geom_type": "point", "tier": "site"}
+         for i in range(n_points)]
+        + [{"id": f"a{i}", "country": "NG", "geom_type": "polygon", "tier": "1"}
+           for i in range(n_polygons)]
+    )
+    return gpd.GeoDataFrame(rows, geometry=points + polygons, crs="EPSG:4326")
+
+
+def test_writes_the_expected_hive_partitions(tmp_path):
+    write_dataset(a_frame(), tmp_path, Report())
+
+    written = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.parquet")}
+
+    assert written == {
+        "locations/country=NG/geom_type=point/tier=site/part-0.parquet",
+        "locations/country=NG/geom_type=polygon/tier=1/part-0.parquet",
+    }
+
+
+def test_geometry_column_uses_the_native_parquet_type(tmp_path):
+    write_dataset(a_frame(), tmp_path, Report())
+    target = next(tmp_path.rglob("*.parquet"))
+
+    schema = pq.ParquetFile(target).schema
+
+    assert "Geometry" in str(schema)
+
+
+def test_a_covering_bbox_column_is_written_and_declared(tmp_path):
+    write_dataset(a_frame(), tmp_path, Report())
+    target = next(tmp_path.rglob("*.parquet"))
+
+    meta = json.loads(pq.ParquetFile(target).metadata.metadata[b"geo"])
+
+    assert "covering" in meta["columns"]["geometry"]
+
+
+def test_each_partition_file_has_a_single_geometry_type(tmp_path):
+    write_dataset(a_frame(), tmp_path, Report())
+
+    for target in tmp_path.rglob("*.parquet"):
+        meta = json.loads(pq.ParquetFile(target).metadata.metadata[b"geo"])
+        assert len(meta["columns"]["geometry"]["geometry_types"]) == 1
+
+
+def test_no_pandas_index_column_leaks_into_the_output(tmp_path):
+    write_dataset(a_frame(), tmp_path, Report())
+    target = next(tmp_path.rglob("*.parquet"))
+
+    names = [pq.ParquetFile(target).schema.column(i).name
+             for i in range(len(pq.ParquetFile(target).schema))]
+
+    assert not any("__index_level_" in name for name in names)
+
+
+def test_row_group_size_is_honoured(tmp_path):
+    write_dataset(a_frame(n_points=500, n_polygons=0), tmp_path, Report(), row_group_size=100)
+    target = next(tmp_path.rglob("*.parquet"))
+
+    assert pq.ParquetFile(target).metadata.num_row_groups == 5
+
+
+def test_hilbert_sorting_clusters_neighbours_together(tmp_path):
+    write_dataset(a_frame(n_points=500, n_polygons=0), tmp_path, Report(), row_group_size=100)
+    target = next(tmp_path.rglob("*.parquet"))
+    frame = gpd.read_parquet(target)
+
+    # Successive rows should be closer together than a random shuffle would be.
+    ordered = frame.geometry
+    step = np.mean([
+        ordered.iloc[i].distance(ordered.iloc[i + 1]) for i in range(len(ordered) - 1)
+    ])
+    shuffled = frame.sample(frac=1, random_state=1).geometry
+    shuffled_step = np.mean([
+        shuffled.iloc[i].distance(shuffled.iloc[i + 1]) for i in range(len(shuffled) - 1)
+    ])
+
+    assert step < shuffled_step / 2
+
+
+def test_small_partitions_are_reported(tmp_path):
+    report = Report()
+
+    write_dataset(a_frame(n_points=5, n_polygons=5), tmp_path, report)
+
+    assert report.counts()["small_partition"] == 2
+
+
+def test_legacy_geo_types_writes_wkb_without_the_native_type(tmp_path):
+    write_dataset(a_frame(), tmp_path, Report(), geo_types="legacy")
+    target = next(tmp_path.rglob("*.parquet"))
+
+    assert "Geometry" not in str(pq.ParquetFile(target).schema)
+
+
+def test_an_empty_frame_writes_nothing_and_does_not_raise(tmp_path):
+    empty = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+    assert write_dataset(empty, tmp_path, Report()) == []
