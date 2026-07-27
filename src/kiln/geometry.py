@@ -56,7 +56,17 @@ def normalize_geojson(payload: bytes, location_id: str, report: Report):
             )
             parts = [_from_dict(g, location_id, report) for g in geometries]
             parts = [part for part in parts if part is not None]
-            return shapely.union_all(parts) if parts else None
+            if not parts:
+                return None
+            # Repair each part before unioning
+            parts = [
+                shapely.make_valid(part) if not part.is_valid else part for part in parts
+            ]
+            try:
+                return shapely.union_all(parts)
+            except Exception as exc:  # noqa: BLE001 topology errors
+                report.add("boundary_unparseable", location_id, f"union failed: {exc}")
+                return None
         return _from_dict(geometries[0], location_id, report)
 
     if kind == "Feature":
@@ -91,13 +101,34 @@ def build_geometry(raw: RawLocation, report: Report) -> GeometryResult:
             report.add("geometry_repaired", raw.id, "invalid ring repaired by make_valid")
 
     if polygon is not None:
-        if raw.position is not None:
-            lon, lat = raw.position
+        # Check if geometry is empty or unexpected type after repair
+        if polygon.is_empty:
+            report.add(
+                "geometry_unexpected_type", raw.id, "empty geometry after repair"
+            )
+            return GeometryResult()
+        elif polygon.geom_type == "Point":
+            if raw.position is not None:
+                lon, lat = raw.position
+            else:
+                lon, lat = polygon.x, polygon.y
+            return GeometryResult(geometry=polygon, geom_type="point", lon=lon, lat=lat)
+        elif polygon.geom_type in POLYGON_TYPES:
+            if raw.position is not None:
+                lon, lat = raw.position
+            else:
+                representative = shapely.point_on_surface(polygon)
+                lon, lat = representative.x, representative.y
+            return GeometryResult(
+                geometry=polygon, geom_type="polygon", lon=lon, lat=lat
+            )
         else:
-            representative = shapely.point_on_surface(polygon)
-            lon, lat = representative.x, representative.y
-        geom_type = "polygon" if polygon.geom_type in POLYGON_TYPES else "point"
-        return GeometryResult(geometry=polygon, geom_type=geom_type, lon=lon, lat=lat)
+            report.add(
+                "geometry_unexpected_type",
+                raw.id,
+                f"unsupported type {polygon.geom_type}",
+            )
+            return GeometryResult()
 
     if raw.position is not None:
         lon, lat = raw.position

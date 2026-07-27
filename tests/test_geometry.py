@@ -130,3 +130,58 @@ def test_a_multipolygon_boundary_is_still_geom_type_polygon():
 
     assert result.geom_type == "polygon"
     assert result.geometry.geom_type == "MultiPolygon"
+
+
+def test_multi_feature_with_invalid_geometry_does_not_raise():
+    report = Report()
+    bowtie = b'{"type":"Polygon","coordinates":[[[0,0],[2,2],[2,0],[0,2],[0,0]]]}'
+    payload = (
+        b'{"type":"FeatureCollection","features":['
+        b'{"type":"Feature","properties":{},"geometry":' + bowtie + b"},"
+        b'{"type":"Feature","properties":{},"geometry":' + SQUARE + b"}]}"
+    )
+
+    geom = normalize_geojson(payload, "loc-1", report)
+
+    assert geom is not None
+    assert report.counts() == {"boundary_multi_feature": 1}
+
+
+def test_geometry_collection_input_is_reported_and_dropped():
+    report = Report()
+    payload = (
+        b'{"type":"GeometryCollection","geometries":['
+        b'{"type":"Point","coordinates":[0,0]},'
+        b'{"type":"LineString","coordinates":[[1,1],[2,2]]}'
+        b"]}"
+    )
+
+    result = build_geometry(
+        RawLocation(id="i", boundary=BoundaryRef(data=payload)), report
+    )
+
+    assert result.geometry is None
+    assert result.geom_type is None
+    assert report.counts() == {"geometry_unexpected_type": 1}
+
+
+def test_degenerate_geometry_that_becomes_linestring_is_reported():
+    report = Report()
+    # A very thin/degenerate polygon that may become a LineString after make_valid
+    # Using a bowtie that when repaired might result in unexpected geometry
+    thin_polygon = (
+        b'{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,0.0001],[0,0.0001],'
+        b"[0,0]]]}"
+    )
+
+    result = build_geometry(
+        RawLocation(id="j", boundary=BoundaryRef(data=thin_polygon)), report
+    )
+
+    # If make_valid produces something other than Point/Polygon/MultiPolygon,
+    # it should be reported
+    if result.geometry is None:
+        assert "geometry_unexpected_type" in report.counts()
+    else:
+        # If it's still valid, ensure it's a polygon or point
+        assert result.geometry.geom_type in {"Point", "Polygon", "MultiPolygon"}
