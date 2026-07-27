@@ -1,4 +1,6 @@
+import errno
 import json
+import os
 
 import geopandas as gpd
 import numpy as np
@@ -128,10 +130,9 @@ def test_a_failed_partition_raises_with_partition_and_stderr_and_leaves_no_file(
     # A source file that does not exist forces ogr2ogr to fail before it
     # writes anything, which is an easy, deterministic way to exercise the
     # failure path without depending on any particular data shape.
+    out_dir = tmp_path / "out"
+    destination = out_dir / "country=NG" / "geom_type=point" / "tier=site" / "part-0.parquet"
     bogus_source = tmp_path / "does-not-exist.parquet"
-    destination = (
-        tmp_path / "out" / "country=NG" / "geom_type=point" / "tier=site" / "part-0.parquet"
-    )
 
     with pytest.raises(PartitionWriteError) as excinfo:
         _finalize(
@@ -140,10 +141,31 @@ def test_a_failed_partition_raises_with_partition_and_stderr_and_leaves_no_file(
             row_group_size=1000,
             geo_types="both",
             partition="country=NG/geom_type=point/tier=site",
+            out_dir=out_dir,
         )
 
     message = str(excinfo.value)
     assert "country=NG/geom_type=point/tier=site" in message
     assert "does-not-exist.parquet" in message  # GDAL's stderr names the missing input
     assert not destination.exists()
-    assert not destination.parent.exists()
+    assert not destination.parent.exists()  # tier=site
+    assert not (out_dir / "country=NG").exists()  # whole empty tree, not just the leaf
+
+
+def test_a_cross_filesystem_replace_is_reported_and_cleaned_up(tmp_path, monkeypatch):
+    # os.replace/os.rename never fall back to a copy across filesystems --
+    # only shutil.move does that -- so a cross-device link is an outright
+    # crash unless _finalize guards it explicitly. Simulate that guard
+    # firing by forcing os.replace to raise the same OSError a tmpfs-vs-
+    # bind-mount container setup would produce.
+    def fake_replace(_source, _destination):
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+
+    with pytest.raises(PartitionWriteError) as excinfo:
+        write_dataset(a_frame(n_points=200, n_polygons=0), tmp_path, Report())
+
+    assert "country=NG/geom_type=point/tier=site" in str(excinfo.value)
+    assert list(tmp_path.rglob("*.parquet")) == []
+    assert not (tmp_path / "locations").exists()

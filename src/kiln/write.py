@@ -25,11 +25,21 @@ MIN_PARTITION_ROWS = 100
 DATASET_DIR = "locations"
 
 
-class GdalUnavailable(RuntimeError):
+class KilnWriteError(RuntimeError):
+    """Base class for errors raised while producing the GeoParquet output.
+
+    Lets a caller (the Task 8 CLI) catch one type and still tell environment
+    problems (`GdalUnavailable`) apart from a specific partition failing
+    (`PartitionWriteError`), without falling back to a bare `RuntimeError`
+    that would also swallow unrelated bugs.
+    """
+
+
+class GdalUnavailable(KilnWriteError):
     """Raised when the system GDAL cannot produce the required output."""
 
 
-class PartitionWriteError(RuntimeError):
+class PartitionWriteError(KilnWriteError):
     """Raised when ogr2ogr fails to finalize a specific partition.
 
     An ogr2ogr failure is an environment or code problem, not a data
@@ -66,23 +76,50 @@ def probe_gdal() -> None:
         )
 
 
+def _remove_if_empty_upward(start: Path, boundary: Path) -> None:
+    """Remove `start` and then its ancestors while each is empty.
+
+    Stops at the first non-empty directory, or at `boundary` (never removed
+    itself — it is the caller-supplied out_dir). Used to undo the directory
+    tree a failed partition would otherwise leave behind.
+    """
+    directory = start
+    while directory != boundary:
+        try:
+            directory.rmdir()
+        except OSError:
+            return
+        directory = directory.parent
+
+
+def _cleanup_failed_partition(scratch: Path, leaf_dir: Path, out_dir: Path) -> None:
+    scratch.unlink(missing_ok=True)
+    _remove_if_empty_upward(leaf_dir, out_dir)
+
+
 def _finalize(
     source: Path,
     destination: Path,
     row_group_size: int,
     geo_types: str,
     partition: str,
+    out_dir: Path,
 ) -> None:
-    """Run ogr2ogr into a scratch file, then atomically publish it.
+    """Run ogr2ogr into a sibling scratch file, then atomically publish it.
 
-    Writing straight to `destination` would let a reader observe a
-    truncated-but-parseable parquet file if ogr2ogr died partway through —
-    worse than no file at all. Finalizing next to `source` (already inside
-    the caller's disposable staging directory) and using `os.replace` means
-    the destination path only ever holds a complete file, and a failed
-    partition leaves no directory tree behind either.
+    The scratch file must live in `destination`'s own directory, not the
+    caller's disposable staging directory: `os.replace` is only atomic
+    within a single filesystem, and a temp directory has no guaranteed
+    relationship to `out_dir` — a container with tmpfs `/tmp` and a
+    bind-mounted output volume hits `Invalid cross-device link` on every
+    run otherwise. Writing straight to `destination` would additionally let
+    a reader observe a truncated-but-parseable file if ogr2ogr died
+    partway through, which is worse than no file at all. Any failure here
+    is cleaned up so no scratch file or empty partition directory survives.
     """
-    scratch = source.with_name(source.stem + ".finalized.parquet")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    scratch = destination.with_name("." + destination.name + ".tmp")
+
     result = subprocess.run(
         [
             "ogr2ogr",
@@ -101,13 +138,19 @@ def _finalize(
         check=False,
     )
     if result.returncode != 0:
+        _cleanup_failed_partition(scratch, destination.parent, out_dir)
         raise PartitionWriteError(
             f"ogr2ogr failed writing partition {partition!r} "
             f"(exit status {result.returncode}):\n{result.stderr.strip()}"
         )
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(scratch, destination)
+    try:
+        os.replace(scratch, destination)
+    except OSError as exc:
+        _cleanup_failed_partition(scratch, destination.parent, out_dir)
+        raise PartitionWriteError(
+            f"could not publish partition {partition!r} to {destination}: {exc}"
+        ) from exc
 
 
 def write_dataset(
@@ -150,7 +193,7 @@ def write_dataset(
             part.to_parquet(staged, index=False)
 
             destination = out_dir.joinpath(DATASET_DIR, *segments, "part-0.parquet")
-            _finalize(staged, destination, row_group_size, geo_types, partition)
+            _finalize(staged, destination, row_group_size, geo_types, partition, out_dir)
             written.append(destination)
 
     return written
