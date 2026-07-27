@@ -213,3 +213,66 @@ def test_max_depth_boundary():
 
     # Exactly 4 too_deep issues (one for each node past the boundary)
     assert report.counts()["too_deep"] == 4
+
+
+def test_shared_ancestor_chain_caching():
+    """Verify that many nodes sharing a deep ancestor chain all resolve correctly.
+
+    This test builds a tree where multiple leaves share a deep ancestor chain,
+    and verifies that all nodes resolve with correct paths, depths, and ancestors.
+    Correct results prove the caching is working (incorrect splicing would produce
+    wrong paths or depths).
+    """
+    report = Report()
+    locations = [
+        loc("root", pcode="ROOT"),
+        loc("a", parent="root", pcode="A"),
+        loc("b", parent="a", pcode="B"),
+        loc("c", parent="b", pcode="C"),
+        loc("d", parent="c", pcode="D"),
+        loc("e", parent="d", pcode="E"),
+        loc("f", parent="e", pcode="F"),
+    ]
+
+    # Add 50 leaves under f
+    for i in range(50):
+        locations.append(
+            loc(
+                f"leaf{i}",
+                parent="f",
+                loc_type="facility",
+                pcode=f"LEAF{i}",
+            )
+        )
+
+    info = resolve_hierarchy(locations, report)
+
+    # All nodes should resolve (57 total: 7 ancestors + 50 leaves)
+    assert len(info) == 57
+
+    # Ancestor paths must be correct
+    assert info["root"].path == "/root"
+    assert info["a"].path == "/root/a"
+    assert info["b"].path == "/root/a/b"
+    assert info["c"].path == "/root/a/b/c"
+    assert info["d"].path == "/root/a/b/c/d"
+    assert info["e"].path == "/root/a/b/c/d/e"
+    assert info["f"].path == "/root/a/b/c/d/e/f"
+
+    # All leaves must have correct paths, depths, and ancestors
+    for i in range(50):
+        leaf_id = f"leaf{i}"
+        assert leaf_id in info
+        assert (
+            info[leaf_id].path == f"/root/a/b/c/d/e/f/leaf{i}"
+        ), f"leaf{i} path incorrect"
+        assert (
+            info[leaf_id].depth == 7
+        ), f"leaf{i} depth should be 7, got {info[leaf_id].depth}"
+        assert (
+            info[leaf_id].ancestor_ids
+            == ["root", "a", "b", "c", "d", "e", "f"]
+        ), f"leaf{i} ancestors incorrect"
+
+    # No issues should be reported
+    assert report.counts() == {}

@@ -64,6 +64,22 @@ def _chain(
         if len(walked) > MAX_DEPTH:
             raise _TooDeepError(walked)
 
+        # Consult cache: if current has a cached chain, splice it onto our
+        # walk and return. This avoids re-walking shared ancestor chains.
+        if current in cache:
+            cached_chain = cache[current]  # root-to-current
+            # walked is [location_id, ..., current] (child-to-root)
+            # walked[::-1] is [current, ..., location_id] (root-to-child)
+            # walked[::-1][1:] is [..., location_id] (skipping current)
+            complete_chain = cached_chain + walked[::-1][1:]
+            # Check if the complete chain exceeds MAX_DEPTH
+            if len(complete_chain) > MAX_DEPTH:
+                raise _TooDeepError(complete_chain)
+            # Cache all prefixes of complete_chain
+            for i, node_id in enumerate(complete_chain):
+                cache[node_id] = complete_chain[: i + 1]
+            return complete_chain
+
         parent_id = by_id[current].parent_id
         if parent_id is None:
             break
@@ -73,7 +89,9 @@ def _chain(
         current = parent_id
 
     walked.reverse()
-    cache[location_id] = walked
+    # Cache all prefixes of walked (root-to-node for each node in chain)
+    for i, node_id in enumerate(walked):
+        cache[node_id] = walked[: i + 1]
     return walked
 
 
