@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import geopandas as gpd
 import pandas as pd
+import pyarrow as pa
 
 from kiln.geometry import build_geometry
 from kiln.hierarchy import ADMIN_COLUMNS, resolve_hierarchy
@@ -25,6 +26,16 @@ STRING_COLUMNS |= {f"admin{i}_code" for i in range(ADMIN_COLUMNS)}
 INTEGER_COLUMNS = {"depth", "admin_level"}
 FLOAT_COLUMNS = {"lon", "lat"}
 LIST_COLUMNS = {"identifiers", "ancestor_ids", "overlays_admin_unit_ids"}
+
+# Define Arrow types for list columns to preserve through parquet/ogr2ogr
+ARROW_LIST_TYPES = {
+    "ancestor_ids": pa.list_(pa.string()),
+    "overlays_admin_unit_ids": pa.list_(pa.string()),
+    "identifiers": pa.list_(pa.struct([
+        pa.field("system", pa.string()),
+        pa.field("value", pa.string()),
+    ])),
+}
 
 # Build dtype dict for all columns except geometry
 DTYPE_MAP = {col: "string" for col in STRING_COLUMNS}
@@ -103,8 +114,15 @@ def build_frame(
 
     if not rows:
         # Empty case: return frame with full schema but zero rows
-        df = pd.DataFrame({col: pd.Series(dtype=DTYPE_MAP[col])
-                           for col in DTYPE_MAP})
+        df_data = {}
+        for col, dtype in DTYPE_MAP.items():
+            if col in ARROW_LIST_TYPES:
+                # Use Arrow dtype for list columns
+                df_data[col] = pd.Series(dtype=pd.ArrowDtype(
+                    ARROW_LIST_TYPES[col]))
+            else:
+                df_data[col] = pd.Series(dtype=dtype)
+        df = pd.DataFrame(df_data)
         return gpd.GeoDataFrame(df, geometry=gpd.GeoSeries(dtype="geometry",
                                                             crs=CRS), crs=CRS)
 
@@ -116,5 +134,8 @@ def build_frame(
         frame[col] = frame[col].astype("Int64")
     for col in FLOAT_COLUMNS:
         frame[col] = frame[col].astype("float64")
+    # Apply Arrow types to list columns for round-trip preservation
+    for col, arrow_type in ARROW_LIST_TYPES.items():
+        frame[col] = frame[col].astype(pd.ArrowDtype(arrow_type))
 
     return frame

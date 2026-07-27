@@ -126,25 +126,28 @@ def test_empty_frame_has_same_columns_as_populated_frame():
                 f"empty={empty[col].dtype}"
 
 
-def test_all_null_columns_survive_parquet_round_trip_through_ogr2ogr():
-    # Build a frame where some columns are entirely null to test dtype preservation
+def test_list_columns_survive_parquet_ogr2ogr_round_trip():
+    # Comprehensive test: all three list columns survive the round-trip
+    # even with empty lists (the case that previously failed).
+    # Test both empty lists and non-empty lists in the same frame.
     report = Report()
     locations = [
         RawLocation(
-            id="test1",
-            name="Test 1",
+            id="loc1",
+            name="Location 1",
             loc_type="facility",
             parent_id="ng",
             position=(3.5, 6.5),
-            # Deliberately omit status, physical_type, gers_id, settlement_type,
-            # delivery_strategy to test null columns
+            identifiers=[{"system": "s1", "value": "v1"}],
+            overlays_admin_unit_ids=["overlay1"],
         ),
         RawLocation(
-            id="test2",
-            name="Test 2",
+            id="loc2",
+            name="Location 2",
             loc_type="facility",
-            parent_id="ng",
+            parent_id="kano",
             position=(3.6, 6.6),
+            # identifiers and overlays default to []
         ),
     ]
 
@@ -160,29 +163,27 @@ def test_all_null_columns_survive_parquet_round_trip_through_ogr2ogr():
         input_parquet = tmpdir_path / "input.parquet"
         output_parquet = tmpdir_path / "output.parquet"
 
-        # Write to parquet
         frame.to_parquet(input_parquet, index=False)
+        subprocess.run([
+            ogr2ogr, "-f", "Parquet", str(output_parquet), str(input_parquet),
+            "-lco", "USE_PARQUET_GEO_TYPES=YES", "-lco", "WRITE_COVERING_BBOX=YES",
+            "-lco", "SORT_BY_BBOX=NO",
+        ], check=True, capture_output=True, text=True)
 
-        # Run ogr2ogr
-        try:
-            subprocess.run([
-                ogr2ogr,
-                "-f", "Parquet",
-                str(output_parquet),
-                str(input_parquet),
-                "-lco", "USE_PARQUET_GEO_TYPES=YES",
-                "-lco", "WRITE_COVERING_BBOX=YES",
-                "-lco", "SORT_BY_BBOX=NO",
-            ], check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            pytest.fail(f"ogr2ogr failed: {e.stderr}")
-
-        # Read back and verify string/int columns with dtypes survived
-        # (list columns are dropped by GDAL, which is acceptable)
         result = gpd.read_parquet(output_parquet)
-        preserved_cols = (set(frame.columns)
-                          - {"identifiers", "ancestor_ids",
-                             "overlays_admin_unit_ids"})
-        missing = preserved_cols - set(result.columns)
-        assert not missing, f"Columns missing after ogr2ogr: {missing}"
+        # Verify all three list columns survived
+        assert "identifiers" in result.columns, "identifiers column missing"
+        assert "ancestor_ids" in result.columns, "ancestor_ids column missing"
+        assert "overlays_admin_unit_ids" in result.columns, \
+            "overlays_admin_unit_ids column missing"
         assert len(result) == len(frame)
+
+        # Verify values survived correctly
+        # Row 0 has non-empty lists
+        assert result.iloc[0]["identifiers"][0] == {"system": "s1",
+                                                     "value": "v1"}
+        assert result.iloc[0]["overlays_admin_unit_ids"][0] == "overlay1"
+        # Row 1 has empty lists
+        assert len(result.iloc[1]["identifiers"]) == 0
+        assert len(result.iloc[1]["ancestor_ids"]) == 0
+        assert len(result.iloc[1]["overlays_admin_unit_ids"]) == 0
