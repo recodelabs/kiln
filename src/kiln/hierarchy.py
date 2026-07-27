@@ -30,20 +30,20 @@ class HierarchyInfo:
 
 
 class _CycleError(Exception):
-    def __init__(self, path: list[str]) -> None:
+    def __init__(self, path: list[str], cycle_node: str) -> None:
         super().__init__(" -> ".join(path))
         self.path = path
+        self.cycle_node = cycle_node
 
 
 class _TooDeepError(Exception):
-    def __init__(self, path: list[str]) -> None:
+    def __init__(self, path: list[str], deep_node: str) -> None:
         super().__init__(" -> ".join(path))
         self.path = path
+        self.deep_node = deep_node
 
 
-def _chain(
-    location_id: str, by_id: dict[str, RawLocation], report: Report
-) -> list[str]:
+def _chain(location_id: str, by_id: dict[str, RawLocation]) -> list[str]:
     """Ids from root to `location_id` inclusive."""
     walked: list[str] = []
     seen: set[str] = set()
@@ -51,22 +51,18 @@ def _chain(
 
     while True:
         if current in seen:
-            raise _CycleError([*walked, current])
+            raise _CycleError([*walked, current], current)
         seen.add(current)
         walked.append(current)
 
         if len(walked) > MAX_DEPTH:
-            raise _TooDeepError(walked)
+            raise _TooDeepError(walked, location_id)
 
         parent_id = by_id[current].parent_id
         if parent_id is None:
             break
         if parent_id not in by_id:
-            report.add(
-                "orphan",
-                current,
-                f"partOf references missing id {parent_id}",
-            )
+            # Dangling parent; treat as root (already reported in pre-walk)
             break
         current = parent_id
 
@@ -84,18 +80,42 @@ def resolve_hierarchy(
     by_id = {location.id: location for location in locations}
     resolved: dict[str, HierarchyInfo] = {}
 
+    # Pre-walk: Report all dangling parents exactly once
+    for location in locations:
+        if location.parent_id and location.parent_id not in by_id:
+            report.add(
+                "orphan",
+                location.id,
+                f"partOf references missing id {location.parent_id}",
+            )
+
     for location in locations:
         try:
-            chain = _chain(location.id, by_id, report)
+            chain = _chain(location.id, by_id)
         except _CycleError as exc:
-            report.add("cycle", location.id, " -> ".join(exc.path))
+            if exc.cycle_node == location.id:
+                report.add("cycle", location.id, " -> ".join(exc.path))
+            else:
+                report.add(
+                    "unreachable_ancestor",
+                    location.id,
+                    f"cycle involving {exc.cycle_node}",
+                )
             continue
         except _TooDeepError as exc:
-            report.add(
-                "too_deep",
-                location.id,
-                f"chain exceeds MAX_DEPTH={MAX_DEPTH}: " + " -> ".join(exc.path),
-            )
+            if exc.deep_node == location.id:
+                report.add(
+                    "too_deep",
+                    location.id,
+                    f"chain exceeds MAX_DEPTH={MAX_DEPTH}: "
+                    + " -> ".join(exc.path),
+                )
+            else:
+                report.add(
+                    "unreachable_ancestor",
+                    location.id,
+                    f"ancestor {exc.deep_node} exceeds MAX_DEPTH",
+                )
             continue
 
         admin_chain = [

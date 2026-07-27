@@ -119,3 +119,69 @@ def test_admin_columns_are_capped_at_five_levels():
 
     assert len(info.admin_names) == 5
     assert len(info.admin_codes) == 5
+
+
+def test_node_downstream_of_cycle_gets_unreachable_ancestor_not_cycle():
+    report = Report()
+    locations = [loc("a", parent="b"), loc("b", parent="a"), loc("c", parent="a")]
+
+    info = resolve_hierarchy(locations, report)
+
+    # c is not in the cycle but points to a member of the cycle
+    assert "c" not in info
+    # a and b are in the cycle
+    assert "a" not in info
+    assert "b" not in info
+
+    # Check counts
+    counts = report.counts()
+    assert counts.get("cycle") == 2
+    assert counts.get("unreachable_ancestor", 0) >= 1
+
+
+def test_one_dangling_edge_with_descendants_produces_one_orphan_issue():
+    report = Report()
+    locations = [
+        loc("orphan_parent", parent="missing"),
+        loc("child1", parent="orphan_parent"),
+        loc("child2", parent="orphan_parent"),
+        loc("grandchild", parent="child1"),
+    ]
+
+    info = resolve_hierarchy(locations, report)
+
+    # Should have exactly one orphan issue
+    assert report.counts().get("orphan") == 1
+    # But all nodes should resolve successfully (orphan becomes root)
+    assert "orphan_parent" in info
+    assert "child1" in info
+    assert "child2" in info
+    assert "grandchild" in info
+
+
+def test_descendant_of_orphaned_ancestor_resolves_normally():
+    report = Report()
+    locations = [
+        loc("orphan", parent="missing", pcode="XX"),
+        loc("child", parent="orphan", pcode="XX001"),
+        loc("grandchild", parent="child", pcode="XX001001"),
+    ]
+
+    info = resolve_hierarchy(locations, report)
+
+    # orphan should be in output (as a root) and reported
+    assert "orphan" in info
+    assert info["orphan"].depth == 0
+    assert info["orphan"].ancestor_ids == []
+
+    # child and grandchild should also be in output
+    assert "child" in info
+    assert info["child"].depth == 1
+    assert info["child"].ancestor_ids == ["orphan"]
+
+    assert "grandchild" in info
+    assert info["grandchild"].depth == 2
+    assert info["grandchild"].ancestor_ids == ["orphan", "child"]
+
+    # Only one orphan issue (for the directly orphaned node)
+    assert report.counts().get("orphan") == 1
