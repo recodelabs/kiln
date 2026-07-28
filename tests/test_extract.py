@@ -162,6 +162,32 @@ def test_read_ndjson_accepts_a_compact_bundle_json_file(tmp_path):
     assert [r["id"] for r in read_ndjson(path)] == ["a", "b"]
 
 
+def test_read_ndjson_reports_a_malformed_line_and_keeps_reading(tmp_path):
+    """The NDJSON seam is the documented third-party hand-off point: one bad
+    line must be reported and skipped, not abort the whole read (previously
+    a bare json.loads(line) let a JSONDecodeError propagate as a traceback).
+    """
+    path = tmp_path / "locations.ndjson"
+    path.write_text('{"resourceType":"Location","id":"a"}\nnot json\n{"id":"b"}\n')
+    report = Report()
+
+    resources = list(read_ndjson(path, report))
+
+    assert [r["id"] for r in resources] == ["a", "b"]
+    assert report.counts() == {"malformed_field": 1}
+    assert "line 2" in report.issues[0].detail
+
+
+def test_read_ndjson_without_a_report_still_skips_malformed_lines(tmp_path):
+    """report is optional -- existing callers that don't pass one must keep
+    working exactly as before, just without the detail.
+    """
+    path = tmp_path / "locations.ndjson"
+    path.write_text('{"id":"a"}\nnot json\n')
+
+    assert [r["id"] for r in read_ndjson(path)] == ["a"]
+
+
 def test_read_ndjson_skips_a_non_list_bundle_entry_field(tmp_path):
     """A Bundle.json with a non-list entry field must not crash iteration."""
     path = tmp_path / "bundle.json"

@@ -219,31 +219,54 @@ def write_ndjson(resources: Iterable[dict], path: Path) -> int:
     return count
 
 
-def read_ndjson(path: Path) -> Iterator[dict]:
-    """Read NDJSON, or a FHIR Bundle .json, as a stream of resources.
+def read_ndjson(path: Path, report: Report | None = None) -> Iterator[dict]:
+    """Read NDJSON, or a single-line FHIR Bundle .json, as a stream of resources.
 
-    Attempts to parse the file as JSON first. If it's a dict with
-    resourceType == "Bundle", explodes entry[].resource. Otherwise falls
-    back to line-by-line NDJSON parsing.
+    Reads the file line by line rather than loading it whole: a boundary
+    attachment inlines several KB-MB of base64 GeoJSON per line, so a
+    file of a million Locations can be gigabytes on disk, and the previous
+    `read_text()` + `splitlines()` implementation held two full in-memory
+    copies of that before parsing a single row.
+
+    The first non-blank line is checked for the Bundle case: if it parses
+    on its own as a complete JSON document and is a Bundle, its
+    `entry[].resource` list is exploded and the rest of the file is not
+    read at all. (This only recognizes a Bundle written on one line, true
+    of every Bundle `kiln extract` or `write_ndjson` itself produces --
+    not one pretty-printed across several lines, which is no longer
+    supported now that the file is read as a stream rather than parsed
+    whole up front.) Otherwise that line, and every line after it, are
+    parsed as one resource each.
+
+    The NDJSON boundary is the documented hand-off point with third-party
+    export tools, so unvalidated input is expected here: a line that isn't
+    valid JSON is reported to `report` (kind `malformed_field`, with the
+    1-based line number) and skipped rather than aborting the whole
+    transform on one bad line. `report` is optional so existing callers
+    that don't need the detail keep working.
     """
     path = Path(path)
-    text = path.read_text(encoding="utf-8")
 
-    # Try to parse the entire file as JSON first
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        payload = None
+    with path.open("r", encoding="utf-8") as handle:
+        first_resource_seen = False
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
 
-    # If it's a Bundle, explode the entries
-    if isinstance(payload, dict) and payload.get("resourceType") == "Bundle":
-        for entry in as_list(payload.get("entry")):
-            if isinstance(entry, dict) and entry.get("resource"):
-                yield entry["resource"]
-        return
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if report is not None:
+                    report.add("malformed_field", "<unknown>", f"line {line_number}: {exc}")
+                continue
 
-    # Otherwise, parse as NDJSON line-by-line
-    for line in text.splitlines():
-        line = line.strip()
-        if line:
-            yield json.loads(line)
+            if not first_resource_seen:
+                first_resource_seen = True
+                if isinstance(payload, dict) and payload.get("resourceType") == "Bundle":
+                    for entry in as_list(payload.get("entry")):
+                        if isinstance(entry, dict) and entry.get("resource"):
+                            yield entry["resource"]
+                    return
+
+            yield payload
