@@ -61,6 +61,22 @@ extract` first (or use `kiln run`); that is the step that fetches
 url-referenced boundaries and inlines them as base64 `data` before anything
 is written to NDJSON.
 
+### Boundary fetching is concurrent, with retry
+
+A registry can carry tens of thousands of url-referenced boundary
+attachments. `extract` fetches them on a pool of worker threads (default 8,
+`--concurrency`) sharing one HTTP client, instead of one at a time — with
+retry and exponential backoff (default 3 attempts, `--retries`) for
+connection errors, `5xx`, and `429`. A `429` honours a `Retry-After` header
+if the server sends one. A `404` (or any other non-retryable `4xx`) is
+*not* retried — it will still be missing on the third attempt, so retrying
+it only multiplies the wait — and is reported once as
+`boundary_fetch_failed`, same as before. Every sleep is capped, so a
+pathological server can't stall the whole run. One boundary's fetch failing
+never aborts the others; progress (`resolved 1200/50000 boundaries (14
+failed)`) prints to stderr for runs large enough to matter, so a
+multi-hour fetch isn't silent throughout.
+
 ### `--in` must be NDJSON (or a single-line Bundle), not pretty-printed JSON
 
 `read_ndjson` streams the input line by line — deliberately, so a
@@ -186,9 +202,15 @@ exits with a clear error rather than crashing on the delete.
 | `--row-group-size` | `20000` | Rows per Parquet row group |
 
 `kiln extract` also takes `--server` (required), `--token`, `--since`
-(`_lastUpdated=gt<since>`) and `--out`. `kiln run` takes the union of
+(`_lastUpdated=gt<since>`) and `--out`, plus the two options below for
+resolving url-referenced boundary attachments. `kiln run` takes the union of
 `extract`'s and `transform`'s options and writes the intermediate NDJSON to
 `<out>/locations.ndjson`.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--concurrency` | `8` | Worker threads fetching url-referenced boundary attachments concurrently, sharing one HTTP client |
+| `--retries` | `3` | Attempts per boundary fetch before giving up, with exponential backoff. Retries connection errors, `5xx`, and `429` (honouring `Retry-After` if present); a `404` or other non-retryable `4xx` is never retried |
 
 ## Schema
 
