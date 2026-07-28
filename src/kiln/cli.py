@@ -10,6 +10,8 @@ from pathlib import Path
 
 from kiln import __version__
 from kiln.extract import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_RETRIES,
     MalformedNdjsonError,
     fetch_locations,
     read_ndjson,
@@ -52,7 +54,13 @@ def _note_unresolved_boundary_urls(resources: list[dict], report: Report) -> Non
 def cmd_extract(args: argparse.Namespace) -> int:
     report = Report()
     resources = list(fetch_locations(args.server, args.token, since=args.since))
-    resolve_boundary_urls(resources, report, token=args.token)
+    resolve_boundary_urls(
+        resources,
+        report,
+        token=args.token,
+        concurrency=args.concurrency,
+        retries=args.retries,
+    )
     count = write_ndjson(resources, Path(args.out))
     print(f"Wrote {count} Locations to {args.out}")
     print(report.summary())
@@ -133,7 +141,12 @@ def cmd_transform(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     ndjson = Path(args.out) / "locations.ndjson"
     extract_args = argparse.Namespace(
-        server=args.server, token=args.token, since=args.since, out=str(ndjson)
+        server=args.server,
+        token=args.token,
+        since=args.since,
+        out=str(ndjson),
+        concurrency=args.concurrency,
+        retries=args.retries,
     )
     code = cmd_extract(extract_args)
     if code != 0:
@@ -168,11 +181,26 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--partition-by", default=",".join(DEFAULT_PARTITION_BY))
         sub.add_argument("--row-group-size", type=int, default=DEFAULT_ROW_GROUP_SIZE)
 
+    def add_extract_options(sub):
+        sub.add_argument(
+            "--concurrency",
+            type=int,
+            default=DEFAULT_CONCURRENCY,
+            help="Worker threads fetching url-referenced boundary attachments",
+        )
+        sub.add_argument(
+            "--retries",
+            type=int,
+            default=DEFAULT_RETRIES,
+            help="Attempts per boundary fetch before giving up (with backoff)",
+        )
+
     extract = subparsers.add_parser("extract", help="Fetch Locations from a FHIR server")
     extract.add_argument("--server", required=True)
     extract.add_argument("--token", default=None)
     extract.add_argument("--since", default=None)
     extract.add_argument("--out", required=True)
+    add_extract_options(extract)
     extract.set_defaults(func=cmd_extract)
 
     transform = subparsers.add_parser("transform", help="Convert NDJSON to GeoParquet")
@@ -184,6 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--server", required=True)
     run.add_argument("--token", default=None)
     run.add_argument("--since", default=None)
+    add_extract_options(run)
     add_transform_options(run)
     run.set_defaults(func=cmd_run)
 
