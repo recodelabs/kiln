@@ -18,6 +18,7 @@ from typing import NamedTuple
 
 import httpx
 
+from kiln.cache import cache_read, cache_write
 from kiln.profile import BOUNDARY_EXTENSION_URL, GEOJSON_CONTENT_TYPE
 from kiln.report import Report
 from kiln.shape import as_list
@@ -164,6 +165,8 @@ def resolve_boundary_urls(
     client: httpx.Client | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     retries: int = DEFAULT_RETRIES,
+    cache_dir: Path | str | None = None,
+    refresh: bool = False,
 ) -> None:
     """Replace url-referenced boundary attachments with inline base64 data.
 
@@ -179,15 +182,30 @@ def resolve_boundary_urls(
     back on this thread and applied to `report` in submission order, so two
     runs over the same input produce identical `report.issues` regardless of
     which thread happened to finish first.
+
+    `cache_dir` turns on the on-disk boundary cache (see `kiln.cache`);
+    `None` (the default) means no cache at all, matching the behavior
+    before this parameter existed -- existing callers that don't pass it
+    keep making a network request for every url-referenced boundary, every
+    time. Passing a directory checks it for a cached copy of each boundary
+    before fetching, and writes every successful fetch back into it
+    (never a failure -- see `kiln.cache.cache_write`). `refresh=True` skips
+    the read (always re-fetches over the network) but still writes the
+    result back, refreshing the entry. Cache problems (an unwritable
+    directory, a corrupt entry) never raise or abort the run; they're
+    reported as `cache_error` and treated as a miss.
     """
     owns_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT)
     headers = _headers(token)
+    resolved_cache_dir = Path(cache_dir) if cache_dir is not None else None
 
     try:
         work = _collect_boundary_work(resources, report)
         if work:
-            _resolve_boundary_work(work, client, headers, report, concurrency, retries)
+            _resolve_boundary_work(
+                work, client, headers, report, concurrency, retries, resolved_cache_dir, refresh
+            )
     finally:
         if owns_client:
             client.close()
@@ -234,6 +252,16 @@ def _collect_boundary_work(resources: list[dict], report: Report) -> list[_Bound
     return work
 
 
+class _FetchOutcome(NamedTuple):
+    """What happened resolving one `_BoundaryFetch`, reported back to the
+    main thread so `report` (and the cache-summary counters) are only ever
+    touched there -- see `resolve_boundary_urls`."""
+
+    cached: bool
+    failure: tuple[str, str, str] | None
+    cache_errors: tuple[tuple[str, str, str], ...]
+
+
 def _resolve_boundary_work(
     work: list[_BoundaryFetch],
     client: httpx.Client,
@@ -241,6 +269,8 @@ def _resolve_boundary_work(
     report: Report,
     concurrency: int,
     retries: int,
+    cache_dir: Path | None,
+    refresh: bool,
 ) -> None:
     """Fetch every queued attachment concurrently and apply reports in order."""
     max_workers = max(1, concurrency)
@@ -249,23 +279,53 @@ def _resolve_boundary_work(
 
     resolved = 0
     failed = 0
+    cached = 0
+    fetched = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submitting all of them up front (rather than as_completed) is what
         # makes the report order deterministic: futures are resolved below
         # in submission order, not completion order, regardless of which
         # worker thread finishes first.
-        futures = [executor.submit(_resolve_one, item, client, headers, retries) for item in work]
+        futures = [
+            executor.submit(_resolve_one, item, client, headers, retries, cache_dir, refresh)
+            for item in work
+        ]
         for future in futures:
             resolved += 1
-            failure = future.result()
-            if failure is not None:
+            outcome = future.result()
+            if outcome.cached:
+                cached += 1
+            elif outcome.failure is not None:
                 failed += 1
-                report.add(*failure)
+            else:
+                fetched += 1
+            if outcome.failure is not None:
+                report.add(*outcome.failure)
+            for cache_error in outcome.cache_errors:
+                report.add(*cache_error)
             if progress:
                 progress.maybe_emit(resolved, failed)
 
     if progress:
         progress.emit_final(resolved, failed)
+
+    # Printed unconditionally (unlike the periodic progress above, which is
+    # gated behind _PROGRESS_MIN_ITEMS): a user needs to be able to tell a
+    # run that was fast because the cache was warm from one that was fast
+    # because there was nothing to do, and that distinction matters just as
+    # much on a small run as a huge one.
+    print(f"boundaries: {cached} cached, {fetched} fetched, {failed} failed", file=sys.stderr)
+
+
+def _apply_boundary_payload(item: _BoundaryFetch, payload: bytes) -> None:
+    """Inline `payload` into `item.attachment` as base64 `data`.
+
+    Safe to call from a worker thread: no other thread ever touches this
+    particular attachment dict.
+    """
+    item.attachment["data"] = base64.b64encode(payload).decode()
+    item.attachment.pop("url", None)
+    item.attachment.setdefault("contentType", GEOJSON_CONTENT_TYPE)
 
 
 def _resolve_one(
@@ -273,22 +333,51 @@ def _resolve_one(
     client: httpx.Client,
     headers: dict[str, str],
     retries: int,
-) -> tuple[str, str, str] | None:
+    cache_dir: Path | None,
+    refresh: bool,
+) -> _FetchOutcome:
     """Fetch one attachment; runs on a worker thread.
 
-    On success, mutates `item.attachment` directly -- safe because no other
-    thread ever touches this particular dict -- and returns None. On
-    failure, returns a `report.add(...)` call's arguments instead of calling
-    it directly, so the report is only ever mutated from the main thread.
+    Checks the cache first (unless `cache_dir` is None or `refresh` forces
+    a re-fetch); on a hit, `item.attachment` is filled in from the cached
+    bytes with no network call. On a miss -- or when caching is off --
+    fetches over the network as before, then writes the result back to the
+    cache on success only: a failed fetch is never cached, since a 404
+    today may be a working URL tomorrow, and caching failures would make a
+    transient outage permanent.
+
+    Cache problems (a corrupt entry, an unwritable directory) never raise:
+    `kiln.cache` returns an error string instead, which comes back here as
+    an extra `cache_error` report tuple alongside whatever this fetch's own
+    outcome is, and resolution proceeds exactly as if the cache entry
+    hadn't been there.
     """
+    cache_errors: list[tuple[str, str, str]] = []
+
+    if cache_dir is not None and not refresh:
+        payload, error = cache_read(cache_dir, item.url)
+        if error is not None:
+            cache_errors.append(("cache_error", item.location_id, error))
+        if payload is not None:
+            _apply_boundary_payload(item, payload)
+            return _FetchOutcome(cached=True, failure=None, cache_errors=tuple(cache_errors))
+
     payload, detail = _fetch_boundary_with_retry(item.url, client, headers, retries)
     if payload is None:
-        return ("boundary_fetch_failed", item.location_id, detail)
+        return _FetchOutcome(
+            cached=False,
+            failure=("boundary_fetch_failed", item.location_id, detail),
+            cache_errors=tuple(cache_errors),
+        )
 
-    item.attachment["data"] = base64.b64encode(payload).decode()
-    item.attachment.pop("url", None)
-    item.attachment.setdefault("contentType", GEOJSON_CONTENT_TYPE)
-    return None
+    _apply_boundary_payload(item, payload)
+
+    if cache_dir is not None:
+        write_error = cache_write(cache_dir, item.url, payload)
+        if write_error is not None:
+            cache_errors.append(("cache_error", item.location_id, write_error))
+
+    return _FetchOutcome(cached=False, failure=None, cache_errors=tuple(cache_errors))
 
 
 def _fetch_boundary_with_retry(

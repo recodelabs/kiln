@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 import kiln.extract as extract_module
+from kiln.cache import cache_key
 from kiln.extract import (
     MalformedNdjsonError,
     fetch_locations,
@@ -691,3 +692,210 @@ def test_resolve_with_concurrency_one_still_works():
     for resource in resources:
         attachment = resource["extension"][0]["valueAttachment"]
         assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+# --- Boundary cache wiring -------------------------------------------------
+
+
+def _counting_handler(response_bytes=GEOJSON, status=200):
+    """A MockTransport handler that counts how many times it was invoked."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url)
+        return httpx.Response(status, content=response_bytes)
+
+    handler.calls = calls
+    return handler
+
+
+def test_a_warm_cache_makes_zero_requests_and_reproduces_the_same_output(tmp_path):
+    cache_dir = tmp_path / "cache"
+    handler = _counting_handler()
+
+    first_resources = _many_resources_with_boundary_urls(5)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resolve_boundary_urls(first_resources, Report(), client=client, cache_dir=cache_dir)
+    assert len(handler.calls) == 5
+
+    second_resources = _many_resources_with_boundary_urls(5)
+    client2 = httpx.Client(transport=httpx.MockTransport(handler))
+    report2 = Report()
+    resolve_boundary_urls(second_resources, report2, client=client2, cache_dir=cache_dir)
+
+    assert len(handler.calls) == 5  # no new requests on the warm run
+    assert report2.counts() == {}
+    for first, second in zip(first_resources, second_resources, strict=True):
+        assert (
+            first["extension"][0]["valueAttachment"]["data"]
+            == second["extension"][0]["valueAttachment"]["data"]
+        )
+
+
+def test_no_cache_dir_neither_reads_nor_writes(tmp_path):
+    """cache_dir=None is what --no-cache maps to at the CLI layer: it must
+    behave exactly as if caching didn't exist -- no reads, no writes."""
+    cache_dir = tmp_path / "cache"
+    handler = _counting_handler()
+
+    resources = _many_resources_with_boundary_urls(3)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resolve_boundary_urls(resources, Report(), client=client, cache_dir=None)
+
+    assert len(handler.calls) == 3
+    assert not cache_dir.exists()  # nothing was ever written
+
+    # A second run over the same URLs still hits the network every time.
+    resources2 = _many_resources_with_boundary_urls(3)
+    client2 = httpx.Client(transport=httpx.MockTransport(handler))
+    resolve_boundary_urls(resources2, Report(), client=client2, cache_dir=None)
+    assert len(handler.calls) == 6
+
+
+def test_refresh_re_fetches_despite_a_warm_cache_and_updates_the_entry(tmp_path):
+    cache_dir = tmp_path / "cache"
+    old_geojson = GEOJSON
+    new_geojson = b'{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]}'
+
+    handler = _counting_handler(response_bytes=old_geojson)
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resolve_boundary_urls(resources, Report(), client=client, cache_dir=cache_dir)
+    assert len(handler.calls) == 1
+
+    # Warm run with the same handler would make zero requests; instead we
+    # swap the handler's response and pass refresh=True, which must ignore
+    # the cache and re-fetch.
+    handler2 = _counting_handler(response_bytes=new_geojson)
+    resources2 = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+    client2 = httpx.Client(transport=httpx.MockTransport(handler2))
+    resolve_boundary_urls(resources2, Report(), client=client2, cache_dir=cache_dir, refresh=True)
+
+    assert len(handler2.calls) == 1
+    attachment = resources2[0]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == new_geojson
+
+    # And the cache entry itself was updated, not left stale.
+    handler3 = _counting_handler(response_bytes=old_geojson)
+    resources3 = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+    client3 = httpx.Client(transport=httpx.MockTransport(handler3))
+    resolve_boundary_urls(resources3, Report(), client=client3, cache_dir=cache_dir)
+    assert len(handler3.calls) == 0  # served from the refreshed cache
+    attachment3 = resources3[0]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment3["data"]) == new_geojson
+
+
+def test_a_failed_fetch_is_not_cached_and_a_later_run_succeeds_normally(tmp_path):
+    cache_dir = tmp_path / "cache"
+
+    def failing_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="gone")
+
+    resources = [a_resource_with_boundary_url("https://files.test/flaky.geojson")]
+    client = httpx.Client(transport=httpx.MockTransport(failing_handler))
+    report = Report()
+    resolve_boundary_urls(resources, report, client=client, cache_dir=cache_dir)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    key = cache_key("https://files.test/flaky.geojson")
+    assert not (cache_dir / f"{key}.bin").exists()
+    assert not (cache_dir / f"{key}.meta.json").exists()
+
+    # The URL "recovers" on a later run -- must not be permanently poisoned.
+    handler = _counting_handler()
+    resources2 = [a_resource_with_boundary_url("https://files.test/flaky.geojson")]
+    client2 = httpx.Client(transport=httpx.MockTransport(handler))
+    report2 = Report()
+    resolve_boundary_urls(resources2, report2, client=client2, cache_dir=cache_dir)
+
+    assert len(handler.calls) == 1
+    assert report2.counts() == {}
+    attachment = resources2[0]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+    assert (cache_dir / f"{key}.bin").exists()
+
+
+def test_an_unwritable_cache_dir_degrades_gracefully(tmp_path):
+    """A disk-full or permissions problem on the cache dir must not fail
+    the export -- it degrades to no-cache-for-this-entry, reported.
+
+    The directory itself is left readable+executable (0o555) so a cache
+    *read* is a plain, unremarkable miss (the entry just isn't there yet);
+    only the *write* -- creating a new temp file in a read-only directory
+    -- is the operation that actually fails here, isolating this test to
+    exactly the write-side failure it's meant to cover.
+    """
+    cache_dir = tmp_path / "boundaries"
+    cache_dir.mkdir()
+    cache_dir.chmod(0o555)
+
+    try:
+        handler = _counting_handler()
+        resources = _many_resources_with_boundary_urls(3)
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        report = Report()
+
+        resolve_boundary_urls(resources, report, client=client, cache_dir=cache_dir)
+
+        assert len(handler.calls) == 3  # export still happened
+        assert report.counts() == {"cache_error": 3}
+        for resource in resources:
+            attachment = resource["extension"][0]["valueAttachment"]
+            assert base64.b64decode(attachment["data"]) == GEOJSON
+    finally:
+        cache_dir.chmod(0o755)
+
+
+def test_a_corrupt_cache_entry_does_not_crash_the_run(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    url = "https://files.test/a.geojson"
+    key = cache_key(url)
+    (cache_dir / f"{key}.bin").write_bytes(b"truncated garbage")
+    (cache_dir / f"{key}.meta.json").write_text('{"url": "' + url + '", "sha256": "deadbeef"}')
+
+    handler = _counting_handler()
+    resources = [a_resource_with_boundary_url(url)]
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    resolve_boundary_urls(resources, report, client=client, cache_dir=cache_dir)
+
+    assert len(handler.calls) == 1  # fell back to a real fetch
+    assert report.counts() == {"cache_error": 1}
+    attachment = resources[0]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def test_concurrent_workers_racing_on_the_same_url_do_not_corrupt_the_cache_entry(tmp_path):
+    """Several Locations sharing one boundary URL, fetched concurrently: two
+    workers can race to write the same cache entry. The entry that lands
+    must always be a complete, valid one -- never a torn write."""
+    cache_dir = tmp_path / "cache"
+    url = "https://files.test/shared.geojson"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        time.sleep(0.01)
+        return httpx.Response(200, content=GEOJSON)
+
+    resources = []
+    for i in range(20):
+        resource = a_resource_with_boundary_url(url)
+        resource["id"] = f"loc-{i}"
+        resources.append(resource)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resolve_boundary_urls(resources, report, client=client, cache_dir=cache_dir, concurrency=10)
+
+    assert report.counts() == {}
+    for resource in resources:
+        attachment = resource["extension"][0]["valueAttachment"]
+        assert base64.b64decode(attachment["data"]) == GEOJSON
+
+    # The cache entry itself must be intact and re-readable.
+    from kiln.cache import cache_read
+
+    payload, error = cache_read(cache_dir, url)
+    assert error is None
+    assert payload == GEOJSON
