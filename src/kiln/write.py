@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 import geopandas as gpd
+import pandas as pd
 
 from kiln.report import Report
 
@@ -97,6 +98,35 @@ def _cleanup_failed_partition(scratch: Path, leaf_dir: Path, out_dir: Path) -> N
     _remove_if_empty_upward(leaf_dir, out_dir)
 
 
+def _partition_segment(key: str, value: object, report: Report) -> str:
+    """Render one `--partition-by` value as a filesystem-safe directory name.
+
+    Two failure modes land here, both from real data rather than a coding
+    bug, so both are handled and reported rather than left to crash:
+
+    - A null value (e.g. `admin_level`, nullable by design) used to be
+      dropped entirely by pandas' default `groupby(dropna=True)`, silently
+      losing every row in that group with no report entry at all. It is
+      now its own group, rendered as the literal `"null"` segment.
+    - A data-derived value (e.g. a `pcode` used as `--partition-by
+      country`) can contain a `/`, which pyarrow/ogr2ogr would otherwise
+      read as an extra path segment and fail with a raw FileNotFoundError.
+    """
+    if pd.isna(value):
+        return "null"
+    text = str(value)
+    sanitized = text.replace("/", "_").replace("\\", "_").replace("\x00", "")
+    sanitized = sanitized or "empty"
+    if sanitized != text:
+        report.add(
+            "partition_value_sanitized",
+            f"{key}={text}",
+            f"contained a path separator or control character; "
+            f"written to the directory {key}={sanitized!r} instead",
+        )
+    return sanitized
+
+
 def _finalize(
     source: Path,
     destination: Path,
@@ -164,10 +194,25 @@ def write_dataset(
     """Sort spatially, split into hive partitions, and write each one."""
     if geo_types not in GEO_TYPE_FLAGS:
         raise ValueError(f"geo_types must be one of {sorted(GEO_TYPE_FLAGS)}")
+
+    out_dir = Path(out_dir)
+    dataset_dir = out_dir / DATASET_DIR
+
+    # kiln owns this directory exclusively (it is the only writer of
+    # `out/locations/`). Re-running transform into the same --out is the
+    # normal nightly-refresh workflow, and only partitions written *this*
+    # run get replaced below -- anything from a prior run whose key set has
+    # since changed (a --country change, an admin level disappearing from
+    # source, all polygons failing to resolve) would otherwise survive
+    # forever, silently doubling the dataset. Clearing it first makes each
+    # run's output an exact reflection of this run's input, every time,
+    # including the case where this run resolves zero rows.
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
+
     if frame.empty:
         return []
 
-    out_dir = Path(out_dir)
     keys = list(partition_by)
 
     # Cluster spatially so a bbox query touches few row groups.
@@ -176,10 +221,17 @@ def write_dataset(
     written: list[Path] = []
     with tempfile.TemporaryDirectory() as staging_root:
         staging = Path(staging_root)
-        for values, part in ordered.groupby(keys, sort=False):
+        # dropna=False: a nullable partition key (admin_level is nullable
+        # by design) must not silently drop every null-valued row from the
+        # output -- see _partition_segment for how the null group's
+        # directory name is rendered.
+        for values, part in ordered.groupby(keys, sort=False, dropna=False):
             if not isinstance(values, tuple):
                 values = (values,)
-            segments = [f"{key}={value}" for key, value in zip(keys, values, strict=True)]
+            segments = [
+                f"{key}={_partition_segment(key, value, report)}"
+                for key, value in zip(keys, values, strict=True)
+            ]
 
             partition = "/".join(segments)
             if len(part) < MIN_PARTITION_ROWS:

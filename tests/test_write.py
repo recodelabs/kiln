@@ -173,6 +173,65 @@ def test_a_cross_filesystem_replace_is_reported_and_cleaned_up(tmp_path, monkeyp
     assert not (tmp_path / "locations").exists()
 
 
+def test_a_nullable_partition_key_does_not_drop_rows(tmp_path):
+    """pandas' groupby default (dropna=True) used to drop every row whose
+    partition key was null with no report entry at all. admin_level is
+    nullable by design, and --partition-by is a documented option, so this
+    is one flag away from a user losing data silently.
+    """
+    frame = a_frame(n_points=5, n_polygons=0)
+    frame["admin_level"] = pd.array([None] * len(frame), dtype="Int64")
+    report = Report()
+
+    written = write_dataset(frame, tmp_path, report, partition_by=("admin_level",))
+
+    assert len(written) == 1
+    result = gpd.read_parquet(written[0])
+    assert len(result) == 5
+    assert "admin_level=null" in written[0].as_posix()
+
+
+def test_a_slash_in_a_partition_value_is_sanitized_not_crashed(tmp_path):
+    """A data-derived value (e.g. a pcode used as --partition-by country)
+    can contain a "/", which would otherwise be read as an extra path
+    segment and crash pyarrow/ogr2ogr with a raw FileNotFoundError.
+    """
+    frame = a_frame(n_points=5, n_polygons=0)
+    frame["country"] = "NG/01"
+    report = Report()
+
+    written = write_dataset(frame, tmp_path, report, partition_by=("country",))
+
+    assert len(written) == 1
+    assert "country=NG_01" in written[0].as_posix()
+    assert "NG/01" not in written[0].as_posix()
+    assert report.counts()["partition_value_sanitized"] == 1
+
+
+def test_rerunning_into_the_same_out_dir_replaces_the_dataset_not_doubles_it(tmp_path):
+    write_dataset(a_frame(n_points=150, n_polygons=0), tmp_path, Report())
+    first = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.parquet")}
+    assert first == {"locations/country=NG/geom_type=point/tier=site/part-0.parquet"}
+
+    second_frame = a_frame(n_points=150, n_polygons=0)
+    second_frame["country"] = "ZZ"
+    write_dataset(second_frame, tmp_path, Report())
+
+    second = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.parquet")}
+    assert second == {"locations/country=ZZ/geom_type=point/tier=site/part-0.parquet"}
+
+
+def test_rerunning_with_an_empty_frame_clears_the_previous_dataset(tmp_path):
+    write_dataset(a_frame(n_points=150, n_polygons=0), tmp_path, Report())
+    assert list(tmp_path.rglob("*.parquet"))
+
+    empty = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    written = write_dataset(empty, tmp_path, Report())
+
+    assert written == []
+    assert list(tmp_path.rglob("*.parquet")) == []
+
+
 def test_null_optional_columns_survive_the_full_write_path(tmp_path):
     """A uniformly-null column must not be silently dropped by ogr2ogr.
 
