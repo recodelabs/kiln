@@ -1086,3 +1086,18 @@ def test_max_consecutive_failures_zero_disables_the_circuit_breaker(monkeypatch)
     assert report.counts() == {"boundary_fetch_failed": 80}
 
 
+# --- Boundary summary line, printed even with no boundary work -------------
+
+
+def test_boundary_summary_line_prints_even_with_zero_boundary_work(capsys):
+    """Before the fix, the summary line was only printed inside `if work:`,
+    so a run with no url-referenced boundaries at all -- indistinguishable
+    from "fast because everything was cached" by timing alone -- printed
+    nothing. It must always be visible, even reporting 0/0/0."""
+    resources = [{"id": "loc-1"}]  # no boundary extension at all
+    report = Report()
+
+    resolve_boundary_urls(resources, report, client=httpx.Client())
+
+    err = capsys.readouterr().err
+    assert "boundaries: 0 cached, 0 fetched, 0 failed" in err

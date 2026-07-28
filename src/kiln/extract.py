@@ -239,18 +239,22 @@ def resolve_boundary_urls(
 
     try:
         work = _collect_boundary_work(resources, report)
-        if work:
-            _resolve_boundary_work(
-                work,
-                client,
-                headers,
-                report,
-                concurrency,
-                retries,
-                resolved_cache_dir,
-                refresh,
-                max_consecutive_failures,
-            )
+        # Always run the fetch phase, even for zero items: this is what
+        # makes the "boundaries: N cached, ..." summary print unconditionally
+        # (see _resolve_boundary_work), so a run with no boundary work at
+        # all is distinguishable from one that resolved everything from a
+        # warm cache, instead of both being silent.
+        _resolve_boundary_work(
+            work,
+            client,
+            headers,
+            report,
+            concurrency,
+            retries,
+            resolved_cache_dir,
+            refresh,
+            max_consecutive_failures,
+        )
     finally:
         if owns_client:
             client.close()
@@ -397,11 +401,15 @@ def _resolve_boundary_work(
     if progress:
         progress.emit_final(resolved, failed)
 
-    # Printed unconditionally (unlike the periodic progress above, which is
-    # gated behind _PROGRESS_MIN_ITEMS): a user needs to be able to tell a
-    # run that was fast because the cache was warm from one that was fast
-    # because there was nothing to do, and that distinction matters just as
-    # much on a small run as a huge one.
+    # Printed unconditionally -- including when `total` is 0 -- unlike the
+    # periodic progress above, which is gated behind _PROGRESS_MIN_ITEMS: a
+    # user needs to be able to tell a run that was fast because the cache
+    # was warm from one that was fast because there was no boundary work at
+    # all, and that distinction matters most exactly when there's nothing
+    # to show a progress line for. (`resolve_boundary_urls` always calls
+    # this function, even with an empty `work` list, so this line is never
+    # skipped the way it used to be when the caller short-circuited on "no
+    # work".)
     print(f"boundaries: {cached} cached, {fetched} fetched, {failed} failed", file=sys.stderr)
 
 

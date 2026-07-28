@@ -121,8 +121,12 @@ worker threads racing to fill the same cache entry can't leave behind a
 half-written file for a later run to read as if it were complete.
 
 Alongside the existing fetch progress, `extract` prints a one-line summary
-to stderr, e.g. `boundaries: 4820 cached, 180 fetched, 3 failed` — the
-only way to tell a fast run apart from one that just had nothing to do.
+to stderr, e.g. `boundaries: 4820 cached, 180 fetched, 3 failed`. Unlike the
+periodic progress ticker (which only appears for 50+ boundaries), this
+summary line always prints, even for a run with a handful of boundaries or
+none at all (`boundaries: 0 cached, 0 fetched, 0 failed`) — it's the only
+way to tell a fast run apart from one that just had nothing to do, and that
+distinction matters most exactly on the small runs the ticker skips.
 
 ### `--in` must be NDJSON (or a single-line Bundle), not pretty-printed JSON
 
