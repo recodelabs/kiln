@@ -392,6 +392,64 @@ def test_cmd_extract_refresh_flag_re_fetches_a_warm_entry(tmp_path, monkeypatch)
     assert len(calls) == 2  # refresh bypassed the warm cache
 
 
+def _bundle_with_many_boundary_urls(n: int) -> dict:
+    return {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Location",
+                    "id": f"loc-{i}",
+                    "extension": [
+                        {
+                            "url": BOUNDARY_EXTENSION_URL,
+                            "valueAttachment": {
+                                "contentType": "application/geo+json",
+                                "url": f"https://fhir.test/boundary/{i}.geojson",
+                            },
+                        }
+                    ],
+                }
+            }
+            for i in range(n)
+        ],
+    }
+
+
+def test_cmd_extract_aborts_cleanly_instead_of_hanging_on_a_systematically_down_host(
+    tmp_path, monkeypatch, capsys
+):
+    """A fully unreachable boundary host (wrong token, bad base URL, host
+    down) must not be retried thousands of times at TIMEOUT-per-attempt
+    cost -- --max-consecutive-failures should trip well before that, and
+    the CLI should exit with a clear message and no traceback, not hang."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "boundary" in request.url.path:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, json=_bundle_with_many_boundary_urls(50))
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+    out = tmp_path / "locations.ndjson"
+
+    code = main(
+        [
+            "extract",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--retries", "1",
+            "--concurrency", "1",
+            "--max-consecutive-failures", "5",
+        ]
+    )
+
+    assert code == 2
+    assert not out.exists()  # aborted -- nothing was written
+    err = capsys.readouterr().err
+    assert "kiln extract:" in err
+    assert "5 consecutive" in err
+
+
 def test_cmd_run_propagates_a_nonzero_exit_code_from_transform(tmp_path, monkeypatch):
     """extract succeeding must not mask transform failing: run's exit code
     is the one the caller (and any nightly-job monitoring) checks.

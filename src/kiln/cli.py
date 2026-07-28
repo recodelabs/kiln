@@ -12,7 +12,9 @@ from kiln import __version__
 from kiln.cache import DEFAULT_CACHE_DIR
 from kiln.extract import (
     DEFAULT_CONCURRENCY,
+    DEFAULT_MAX_CONSECUTIVE_FAILURES,
     DEFAULT_RETRIES,
+    BoundaryFetchAborted,
     MalformedNdjsonError,
     fetch_locations,
     read_ndjson,
@@ -55,15 +57,24 @@ def _note_unresolved_boundary_urls(resources: list[dict], report: Report) -> Non
 def cmd_extract(args: argparse.Namespace) -> int:
     report = Report()
     resources = list(fetch_locations(args.server, args.token, since=args.since))
-    resolve_boundary_urls(
-        resources,
-        report,
-        token=args.token,
-        concurrency=args.concurrency,
-        retries=args.retries,
-        cache_dir=None if args.no_cache else args.cache_dir,
-        refresh=args.refresh,
-    )
+    try:
+        resolve_boundary_urls(
+            resources,
+            report,
+            token=args.token,
+            concurrency=args.concurrency,
+            retries=args.retries,
+            cache_dir=None if args.no_cache else args.cache_dir,
+            refresh=args.refresh,
+            max_consecutive_failures=args.max_consecutive_failures,
+        )
+    except BoundaryFetchAborted as exc:
+        # Systematic failure (server unreachable, wrong token, bad base
+        # URL), not a data problem -- nothing was written, same as the
+        # existing RuntimeErrors raised by fetch_locations for a protocol
+        # fault (cyclic pagination, a non-JSON page, ...).
+        print(f"kiln extract: {exc}", file=sys.stderr)
+        return USAGE_ERROR
     count = write_ndjson(resources, Path(args.out))
     print(f"Wrote {count} Locations to {args.out}")
     print(report.summary())
@@ -153,6 +164,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         cache_dir=args.cache_dir,
         no_cache=args.no_cache,
         refresh=args.refresh,
+        max_consecutive_failures=args.max_consecutive_failures,
     )
     code = cmd_extract(extract_args)
     if code != 0:
@@ -218,6 +230,19 @@ def build_parser() -> argparse.ArgumentParser:
             help=(
                 "Ignore existing cache entries and re-fetch every boundary, "
                 "still writing results back to the cache"
+            ),
+        )
+        sub.add_argument(
+            "--max-consecutive-failures",
+            dest="max_consecutive_failures",
+            type=int,
+            default=DEFAULT_MAX_CONSECUTIVE_FAILURES,
+            help=(
+                "Abort if this many boundary fetches in a row fail with zero "
+                "successes anywhere in the run -- a signal of a systematic "
+                "problem (server unreachable, wrong token, bad base URL) "
+                "rather than a handful of bad boundary URLs. 0 disables this "
+                f"check (default: {DEFAULT_MAX_CONSECUTIVE_FAILURES})"
             ),
         )
 

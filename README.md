@@ -80,6 +80,16 @@ boundary's fetch failing never aborts the others; progress (`resolved
 1200/50000 boundaries (14 failed)`) prints to stderr for runs large enough
 to matter, so a multi-hour fetch isn't silent throughout.
 
+A server that is entirely unreachable (wrong token, bad `--server`, host
+down) is a different problem from a handful of dead boundary URLs: retrying
+every one of tens of thousands of Locations for up to a minute each before
+giving up would take hours to fail. `--max-consecutive-failures` (default
+50, `0` to disable) aborts the run early if that many boundary fetches in a
+row fail *and nothing has succeeded yet in the whole run* — the "zero
+successes" condition is what keeps a registry with a genuine scattering of
+dead URLs (a data problem) from ever tripping it, no matter how those
+failures happen to be distributed.
+
 ### Fetched boundaries are cached on disk
 
 Admin boundaries change rarely — once a year at most — so `extract` caches
@@ -251,6 +261,7 @@ resolving url-referenced boundary attachments. `kiln run` takes the union of
 | `--cache-dir` | `~/.cache/kiln/boundaries/` | Local disk cache for fetched boundary attachments, keyed on a sha256 hash of each boundary's URL. A warm cache turns a second run over the same registry into a near-instant, no-network operation, and lets a killed-halfway run resume without re-fetching what it already has |
 | `--no-cache` | off | Disable the boundary cache entirely for this run — neither read nor write it |
 | `--refresh` | off | Ignore existing cache entries and re-fetch every boundary over the network, but still write the fresh results back so the cache is warm again afterward |
+| `--max-consecutive-failures` | `50` | Abort (`kiln extract` exits with status 2) if this many boundary fetches in a row fail with zero successes anywhere in the run — a signal of a systematic problem (server unreachable, wrong token, bad base URL), not a handful of bad boundary URLs. `0` disables this check |
 
 ## Schema
 

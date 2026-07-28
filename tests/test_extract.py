@@ -1006,3 +1006,83 @@ def test_resolve_reports_a_malformed_boundary_url_instead_of_crashing():
     assert report.counts() == {"boundary_fetch_failed": 1}
     assert "data" not in resources[0]["extension"][0]["valueAttachment"]
 
+
+# --- Circuit breaker for systematic failure ---------------------------------
+
+
+def test_circuit_breaker_aborts_after_consecutive_failures_with_zero_successes(monkeypatch):
+    """A fully down/misconfigured server (wrong token, bad base URL, ...)
+    must not be retried thousands of times at TIMEOUT-per-attempt cost --
+    the breaker should abort quickly instead."""
+    monkeypatch.setattr(extract_module.time, "sleep", lambda seconds: None)
+    resources = _many_resources_with_boundary_urls(200)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    with pytest.raises(extract_module.BoundaryFetchAborted, match="5 consecutive"):
+        resolve_boundary_urls(
+            resources,
+            report,
+            client=client,
+            retries=1,
+            concurrency=1,
+            max_consecutive_failures=5,
+        )
+
+    # Aborted after exactly the threshold, not after grinding through all 200.
+    assert report.counts() == {"boundary_fetch_failed": 5}
+
+
+def test_circuit_breaker_does_not_trip_when_at_least_one_boundary_has_succeeded(monkeypatch):
+    """A scattering of dead URLs in an otherwise-healthy registry is a data
+    problem, not an environment one, and must never abort the run --
+    requiring *zero* successes anywhere is what protects this case."""
+    monkeypatch.setattr(extract_module.time, "sleep", lambda seconds: None)
+    resources = _many_resources_with_boundary_urls(100)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/0.geojson" in str(request.url):
+            return httpx.Response(200, content=GEOJSON)
+        return httpx.Response(500, text="boom")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    resolve_boundary_urls(
+        resources,
+        report,
+        client=client,
+        retries=1,
+        concurrency=1,
+        max_consecutive_failures=5,
+    )
+
+    assert report.counts() == {"boundary_fetch_failed": 99}
+
+
+def test_max_consecutive_failures_zero_disables_the_circuit_breaker(monkeypatch):
+    monkeypatch.setattr(extract_module.time, "sleep", lambda seconds: None)
+    resources = _many_resources_with_boundary_urls(80)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    resolve_boundary_urls(
+        resources,
+        report,
+        client=client,
+        retries=1,
+        concurrency=4,
+        max_consecutive_failures=0,
+    )
+
+    assert report.counts() == {"boundary_fetch_failed": 80}
+
+

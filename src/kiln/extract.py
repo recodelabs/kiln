@@ -30,6 +30,10 @@ TIMEOUT = httpx.Timeout(60.0)
 # that override them.
 DEFAULT_CONCURRENCY = 8
 DEFAULT_RETRIES = 3
+# Circuit breaker: abort if this many *consecutive* boundary fetches fail
+# with zero successes anywhere in the run so far. 0 disables the breaker.
+# See resolve_boundary_urls' docstring and BoundaryFetchAborted.
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 50
 
 # Exponential backoff between retry attempts: 0.5s, 1s, 2s, 4s, ...
 _RETRY_BASE_DELAY = 0.5
@@ -60,6 +64,22 @@ class MalformedNdjsonError(ValueError):
     silently "successful" run that (combined with `write_dataset` owning
     `out/locations/`) would replace a user's previous good export with
     nothing, for an input kiln simply cannot read.
+    """
+
+
+class BoundaryFetchAborted(RuntimeError):
+    """Raised by resolve_boundary_urls' circuit breaker: systematic failure,
+    not a scattering of individually bad boundary URLs.
+
+    `resolve_boundary_urls` otherwise never raises -- a single unreachable
+    boundary is a data problem, reported and skipped. This is different: it
+    only fires when *zero* boundaries have succeeded anywhere in the run and
+    a long consecutive run of failures has piled up, which is the signature
+    of an environment problem (server unreachable, wrong token, bad base
+    URL) rather than a few dead URLs in an otherwise-healthy registry. That
+    is deliberately an abort, not a report: continuing would just retry the
+    same broken connection thousands more times for no benefit (see
+    `--max-consecutive-failures`, 0 to disable).
     """
 
 
@@ -167,11 +187,16 @@ def resolve_boundary_urls(
     retries: int = DEFAULT_RETRIES,
     cache_dir: Path | str | None = None,
     refresh: bool = False,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
 ) -> None:
     """Replace url-referenced boundary attachments with inline base64 data.
 
-    Mutates `resources` in place. Failures are reported, never raised: one
-    unreachable boundary must not lose the whole export.
+    Mutates `resources` in place. Per-boundary failures are reported, never
+    raised: one unreachable boundary must not lose the whole export. The
+    one exception is the circuit breaker (`max_consecutive_failures`,
+    `BoundaryFetchAborted`) below, which is deliberately an abort -- it
+    only trips on a systematic, environment-level failure, not a data
+    problem, so it does not weaken that guarantee for ordinary bad data.
 
     The tree walk (finding which attachments need fetching) runs
     single-threaded and reports its own shape problems (a non-dict
@@ -194,6 +219,18 @@ def resolve_boundary_urls(
     result back, refreshing the entry. Cache problems (an unwritable
     directory, a corrupt entry) never raise or abort the run; they're
     reported as `cache_error` and treated as a miss.
+
+    `max_consecutive_failures` (default `DEFAULT_MAX_CONSECUTIVE_FAILURES`,
+    `--max-consecutive-failures` at the CLI, 0 to disable) guards against a
+    fully unreachable server or a bad token: with a large registry and the
+    default 60s timeout and 3 retries, thousands of boundaries that all
+    fail can take hours to grind through for zero useful output. If this
+    many fetches in a row fail *and nothing has succeeded yet in this run*,
+    resolution stops and raises `BoundaryFetchAborted` instead of grinding
+    through the rest at the same failure rate. Requiring zero successes
+    (not just a recent streak) means a registry with a genuine scattering
+    of dead URLs -- a data problem, not an environment one -- can never
+    trip it, no matter how the failures happen to be ordered.
     """
     owns_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT)
@@ -204,7 +241,15 @@ def resolve_boundary_urls(
         work = _collect_boundary_work(resources, report)
         if work:
             _resolve_boundary_work(
-                work, client, headers, report, concurrency, retries, resolved_cache_dir, refresh
+                work,
+                client,
+                headers,
+                report,
+                concurrency,
+                retries,
+                resolved_cache_dir,
+                refresh,
+                max_consecutive_failures,
             )
     finally:
         if owns_client:
@@ -271,16 +316,20 @@ def _resolve_boundary_work(
     retries: int,
     cache_dir: Path | None,
     refresh: bool,
+    max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
 ) -> None:
     """Fetch every queued attachment concurrently and apply reports in order."""
     max_workers = max(1, concurrency)
     total = len(work)
     progress = _ProgressReporter(total) if total >= _PROGRESS_MIN_ITEMS else None
+    breaker_enabled = max_consecutive_failures > 0
 
     resolved = 0
     failed = 0
     cached = 0
     fetched = 0
+    consecutive_failures = 0
+    had_any_success = False
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submitting all of them up front (rather than as_completed) is what
         # makes the report order deterministic: futures are resolved below
@@ -305,16 +354,45 @@ def _resolve_boundary_work(
             outcome = future.result()
             if outcome.cached:
                 cached += 1
+                had_any_success = True
+                consecutive_failures = 0
             elif outcome.failure is not None:
                 failed += 1
+                consecutive_failures += 1
             else:
                 fetched += 1
+                had_any_success = True
+                consecutive_failures = 0
             if outcome.failure is not None:
                 report.add(*outcome.failure)
             for cache_error in outcome.cache_errors:
                 report.add(*cache_error)
             if progress:
                 progress.maybe_emit(resolved, failed)
+
+            if (
+                breaker_enabled
+                and not had_any_success
+                and consecutive_failures >= max_consecutive_failures
+            ):
+                # Systematic failure, not a data problem: cancel whatever
+                # hasn't started yet so the thousands of remaining items
+                # don't all still run out their own retries/timeouts before
+                # this can return. Already-running attempts still finish
+                # (a thread mid-`client.get()` can't be interrupted), so the
+                # actual wall-clock cost of aborting is bounded by roughly
+                # one worker's worth of attempts, not the whole queue.
+                executor.shutdown(wait=False, cancel_futures=True)
+                last_detail = outcome.failure[2] if outcome.failure else "unknown"
+                raise BoundaryFetchAborted(
+                    f"{consecutive_failures} consecutive boundary fetches failed with "
+                    "zero successes -- this looks like a systematic problem (server "
+                    "unreachable, wrong token, or a bad base URL), not a handful of "
+                    f"bad boundary URLs. Aborting instead of grinding through the "
+                    f"remaining {total - resolved} at the same failure rate. Last "
+                    f"failure: {last_detail}. Pass --max-consecutive-failures 0 to "
+                    "disable this check."
+                )
 
     if progress:
         progress.emit_final(resolved, failed)
