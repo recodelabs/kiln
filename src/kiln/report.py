@@ -39,3 +39,43 @@ class Report:
             return "No issues found."
         lines = [f"  {kind}: {count}" for kind, count in sorted(counts.items())]
         return "Issues found:\n" + "\n".join(lines)
+
+
+def check_duplicate_pcodes(frame, report: Report) -> None:
+    """Flag pcodes claimed by more than one Location."""
+    with_pcode = frame[frame["pcode"].notna()]
+    duplicated = with_pcode[with_pcode.duplicated("pcode", keep=False)]
+    for pcode, group in duplicated.groupby("pcode"):
+        report.add(
+            "duplicate_pcode",
+            ", ".join(sorted(group["id"])),
+            f"pcode {pcode} claimed by {len(group)} Locations",
+        )
+
+
+def check_points_within_parents(frame, report: Report) -> None:
+    """Flag sites whose point falls outside their nearest admin ancestor.
+
+    In microplanning this is nearly always a real data error.
+    """
+    import shapely
+
+    polygons = frame[frame["geom_type"] == "polygon"]
+    if polygons.empty:
+        return
+    by_id = dict(zip(polygons["id"], polygons.geometry, strict=True))
+
+    for row in frame.itertuples():
+        if row.lon is None or row.ancestor_ids is None:
+            continue
+        parent_polygon = next(
+            (by_id[a] for a in reversed(list(row.ancestor_ids)) if a in by_id), None
+        )
+        if parent_polygon is None:
+            continue
+        if not parent_polygon.covers(shapely.Point(row.lon, row.lat)):
+            report.add(
+                "point_outside_parent",
+                row.id,
+                f"({row.lon}, {row.lat}) falls outside its nearest admin ancestor",
+            )
