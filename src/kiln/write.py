@@ -8,6 +8,7 @@ second pass exists.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -24,6 +25,11 @@ DEFAULT_PARTITION_BY = ("country", "geom_type", "tier")
 DEFAULT_ROW_GROUP_SIZE = 20000
 MIN_PARTITION_ROWS = 100
 DATASET_DIR = "locations"
+# Siblings of DATASET_DIR under out_dir, never nested under it, so every
+# rename involved in the swap (see _swap_dataset_dir) stays on one
+# filesystem and is atomic.
+STAGING_DIR_NAME = ".locations.tmp"
+SWAP_BACKUP_DIR_NAME = ".locations.old.tmp"
 
 
 class KilnWriteError(RuntimeError):
@@ -81,8 +87,8 @@ def _remove_if_empty_upward(start: Path, boundary: Path) -> None:
     """Remove `start` and then its ancestors while each is empty.
 
     Stops at the first non-empty directory, or at `boundary` (never removed
-    itself — it is the caller-supplied out_dir). Used to undo the directory
-    tree a failed partition would otherwise leave behind.
+    itself — it is the caller-supplied dataset root). Used to undo the
+    directory tree a failed partition would otherwise leave behind.
     """
     directory = start
     while directory != boundary:
@@ -93,38 +99,184 @@ def _remove_if_empty_upward(start: Path, boundary: Path) -> None:
         directory = directory.parent
 
 
-def _cleanup_failed_partition(scratch: Path, leaf_dir: Path, out_dir: Path) -> None:
+def _cleanup_failed_partition(scratch: Path, leaf_dir: Path, dataset_root: Path) -> None:
     scratch.unlink(missing_ok=True)
-    _remove_if_empty_upward(leaf_dir, out_dir)
+    _remove_if_empty_upward(leaf_dir, dataset_root)
 
 
-def _partition_segment(key: str, value: object, report: Report) -> str:
-    """Render one `--partition-by` value as a filesystem-safe directory name.
+def _reject_symlinked_dataset_dir(dataset_dir: Path) -> None:
+    """Refuse to operate through a symlinked `out/locations`.
 
-    Two failure modes land here, both from real data rather than a coding
-    bug, so both are handled and reported rather than left to crash:
+    Without this check, the rest of this module's rename/rmtree dance would
+    eventually hit `shutil.rmtree`'s own guard ("Cannot call rmtree on a
+    symbolic link") as a raw, uncaught OSError. Fail with a clear,
+    typed error up front instead.
+    """
+    if dataset_dir.is_symlink():
+        raise KilnWriteError(
+            f"{dataset_dir} is a symlink; kiln refuses to write through a "
+            "symlinked dataset directory. Replace it with a real directory "
+            "(or remove the symlink) before running transform again."
+        )
+
+
+def _remove_dataset_dir(path: Path) -> None:
+    """rmtree a finalized dataset directory, refusing to unlink through a symlink."""
+    if path.is_symlink():
+        raise KilnWriteError(
+            f"{path} is a symlink; kiln refuses to delete through a symlinked "
+            "path. Replace it with a real directory (or remove the symlink) "
+            "before running transform again."
+        )
+    shutil.rmtree(path)
+
+
+def _recover_incomplete_swap(dataset_dir: Path, backup_dir: Path, staging_dir: Path) -> None:
+    """Heal leftover state from a process that died mid-swap on a previous run.
+
+    `_swap_dataset_dir` publishes a new dataset with two renames, because
+    POSIX `rename()` cannot atomically replace a non-empty directory in one
+    step: first the live dataset is moved aside to `backup_dir`, then the
+    fully-written new dataset is moved into its place. A crash can land in
+    three spots, and this undoes each one before the next run starts:
+
+    - Between the two renames: `dataset_dir` is briefly absent and
+      `backup_dir` holds the last good dataset. Restore it.
+    - After the swap but before `backup_dir` was cleaned up: `dataset_dir`
+      is already the new data; `backup_dir` is just stale. Remove it.
+    - Mid-write, before the swap ever started: only `staging_dir` has
+      anything in it, and it is necessarily incomplete. Discard it.
+    """
+    if backup_dir.exists():
+        if not dataset_dir.exists():
+            os.replace(backup_dir, dataset_dir)
+        else:
+            _remove_dataset_dir(backup_dir)
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+
+
+def _swap_dataset_dir(dataset_dir: Path, backup_dir: Path, new_dataset_dir: Path) -> None:
+    """Publish `new_dataset_dir` as `dataset_dir`.
+
+    Two renames, each atomic on its own (guaranteed single-filesystem since
+    `backup_dir` and `new_dataset_dir` are siblings of `dataset_dir` under
+    the same out_dir). The only non-atomic window is between them, where
+    `dataset_dir` briefly does not exist; `_recover_incomplete_swap` (run at
+    the top of every `write_dataset` call) detects and heals exactly that
+    window on the next run by restoring `backup_dir`.
+    """
+    if dataset_dir.exists():
+        os.replace(dataset_dir, backup_dir)
+    os.replace(new_dataset_dir, dataset_dir)
+    if backup_dir.exists():
+        _remove_dataset_dir(backup_dir)
+
+
+def _sanitize_partition_text(value: object) -> tuple[str, str, bool]:
+    """Render one partition value as filesystem-safe text.
+
+    Returns `(raw_text, candidate_segment, was_sanitized)`. `raw_text` is
+    `str(value)` (or the literal `"null"` for a missing value) and is used
+    only for reporting; `candidate_segment` is what actually gets used as
+    the directory name, pending collision disambiguation.
+    """
+    if pd.isna(value):
+        return "null", "null", False
+    raw = str(value)
+    candidate = raw.replace("/", "_").replace("\\", "_").replace("\x00", "")
+    candidate = candidate or "empty"
+    return raw, candidate, candidate != raw
+
+
+def _value_identity(value: object) -> object:
+    """A hashable identity distinguishing values that render identically.
+
+    `None` and the literal string `"null"` both render as `"null"`; the
+    integer `5` and the string `"5"` both render as `"5"`. They must still
+    be treated as distinct source values for collision purposes, so the
+    identity carries the original type, not just the rendered text.
+    """
+    if pd.isna(value):
+        return "__null__"
+    return (type(value).__name__, str(value))
+
+
+def _partition_segment(
+    key: str,
+    value: object,
+    report: Report,
+    claims: dict[str, object],
+) -> str:
+    """Render one `--partition-by` value as a filesystem-safe, collision-free
+    directory name segment (without the `key=` prefix), scoped to `claims`
+    (one dict per parent-directory-and-key context — see `_write_all_partitions`).
+
+    Three failure modes land here, all from real data rather than a coding
+    bug, so all are handled and reported rather than left to crash or
+    silently lose rows:
 
     - A null value (e.g. `admin_level`, nullable by design) used to be
-      dropped entirely by pandas' default `groupby(dropna=True)`, silently
-      losing every row in that group with no report entry at all. It is
-      now its own group, rendered as the literal `"null"` segment.
+      dropped entirely by pandas' default `groupby(dropna=True)`. It is its
+      own group, rendered as the literal `"null"` segment.
     - A data-derived value (e.g. a `pcode` used as `--partition-by
       country`) can contain a `/`, which pyarrow/ogr2ogr would otherwise
       read as an extra path segment and fail with a raw FileNotFoundError.
+      It is sanitized for the directory name.
+    - Two *distinct* values can sanitize (or render) to the *same* segment
+      — `"A/B"` and `"A_B"` both become `"A_B"`; `None` and the literal
+      string `"null"` both become `"null"` — and the second one used to
+      silently `os.replace` the first partition file, discarding every row
+      in it with zero report entries. The second (and any further) value to
+      claim an already-taken segment gets a short deterministic hash of its
+      original value appended, so the two never collide on disk.
     """
-    if pd.isna(value):
-        return "null"
-    text = str(value)
-    sanitized = text.replace("/", "_").replace("\\", "_").replace("\x00", "")
-    sanitized = sanitized or "empty"
-    if sanitized != text:
+    raw, candidate, was_sanitized = _sanitize_partition_text(value)
+    identity = _value_identity(value)
+
+    claimant = claims.get(candidate)
+    if claimant is None:
+        claims[candidate] = identity
+        segment = candidate
+    elif claimant == identity:
+        segment = candidate
+    else:
+        segment = _disambiguate(candidate, value, identity, claims)
+        report.add(
+            "partition_value_collision",
+            f"{key}={raw}",
+            f"renders to the same directory segment {key}={candidate!r} as a "
+            f"different value already written under this partition; "
+            f"disambiguated to {key}={segment!r} instead",
+        )
+        return segment
+
+    if was_sanitized:
         report.add(
             "partition_value_sanitized",
-            f"{key}={text}",
+            f"{key}={raw}",
             f"contained a path separator or control character; "
-            f"written to the directory {key}={sanitized!r} instead",
+            f"written to the directory {key}={candidate!r} instead",
         )
-    return sanitized
+    return segment
+
+
+def _disambiguate(
+    candidate: str,
+    value: object,
+    identity: object,
+    claims: dict[str, object],
+) -> str:
+    """Append a short deterministic hash of `value` to `candidate` until unique."""
+    salt = ""
+    while True:
+        digest = hashlib.sha1(f"{candidate}\x00{value!r}{salt}".encode()).hexdigest()[:8]
+        segment = f"{candidate}~{digest}"
+        existing = claims.get(segment)
+        if existing is None or existing == identity:
+            claims[segment] = identity
+            return segment
+        salt += "#"
 
 
 def _finalize(
@@ -183,42 +335,25 @@ def _finalize(
         ) from exc
 
 
-def write_dataset(
+def _write_all_partitions(
     frame: gpd.GeoDataFrame,
-    out_dir: Path,
+    keys: list[str],
+    dataset_dir: Path,
     report: Report,
-    partition_by: tuple[str, ...] = DEFAULT_PARTITION_BY,
-    row_group_size: int = DEFAULT_ROW_GROUP_SIZE,
-    geo_types: str = "both",
+    row_group_size: int,
+    geo_types: str,
 ) -> list[Path]:
-    """Sort spatially, split into hive partitions, and write each one."""
-    if geo_types not in GEO_TYPE_FLAGS:
-        raise ValueError(f"geo_types must be one of {sorted(GEO_TYPE_FLAGS)}")
-
-    out_dir = Path(out_dir)
-    dataset_dir = out_dir / DATASET_DIR
-
-    # kiln owns this directory exclusively (it is the only writer of
-    # `out/locations/`). Re-running transform into the same --out is the
-    # normal nightly-refresh workflow, and only partitions written *this*
-    # run get replaced below -- anything from a prior run whose key set has
-    # since changed (a --country change, an admin level disappearing from
-    # source, all polygons failing to resolve) would otherwise survive
-    # forever, silently doubling the dataset. Clearing it first makes each
-    # run's output an exact reflection of this run's input, every time,
-    # including the case where this run resolves zero rows.
-    if dataset_dir.exists():
-        shutil.rmtree(dataset_dir)
-
-    if frame.empty:
-        return []
-
-    keys = list(partition_by)
-
+    """Write every partition of `frame` under `dataset_dir` (a fresh staging tree)."""
     # Cluster spatially so a bbox query touches few row groups.
     ordered = frame.iloc[frame.hilbert_distance().argsort()].reset_index(drop=True)
 
     written: list[Path] = []
+    # One claims dict per (parent-path-so-far, key): a segment only needs to
+    # be unique among siblings inside the same parent directory, not
+    # globally, since a repeated value at a shallower level (e.g. the same
+    # country under two different geom_types) is not a collision at all.
+    claims_by_context: dict[tuple[tuple[str, ...], str], dict[str, object]] = {}
+
     with tempfile.TemporaryDirectory() as staging_root:
         staging = Path(staging_root)
         # dropna=False: a nullable partition key (admin_level is nullable
@@ -228,10 +363,15 @@ def write_dataset(
         for values, part in ordered.groupby(keys, sort=False, dropna=False):
             if not isinstance(values, tuple):
                 values = (values,)
-            segments = [
-                f"{key}={_partition_segment(key, value, report)}"
-                for key, value in zip(keys, values, strict=True)
-            ]
+
+            segments: list[str] = []
+            path_so_far: tuple[str, ...] = ()
+            for key, value in zip(keys, values, strict=True):
+                context = (path_so_far, key)
+                claims = claims_by_context.setdefault(context, {})
+                segment_value = _partition_segment(key, value, report, claims)
+                segments.append(f"{key}={segment_value}")
+                path_so_far = tuple(segments)
 
             partition = "/".join(segments)
             if len(part) < MIN_PARTITION_ROWS:
@@ -244,8 +384,62 @@ def write_dataset(
             staged = staging / ("_".join(segments) + ".parquet")
             part.to_parquet(staged, index=False)
 
-            destination = out_dir.joinpath(DATASET_DIR, *segments, "part-0.parquet")
-            _finalize(staged, destination, row_group_size, geo_types, partition, out_dir)
+            destination = dataset_dir.joinpath(*segments, "part-0.parquet")
+            _finalize(staged, destination, row_group_size, geo_types, partition, dataset_dir)
             written.append(destination)
 
     return written
+
+
+def write_dataset(
+    frame: gpd.GeoDataFrame,
+    out_dir: Path,
+    report: Report,
+    partition_by: tuple[str, ...] = DEFAULT_PARTITION_BY,
+    row_group_size: int = DEFAULT_ROW_GROUP_SIZE,
+    geo_types: str = "both",
+) -> list[Path]:
+    """Sort spatially, split into hive partitions, and write each one.
+
+    `out_dir/locations` is replaced atomically: every partition is written
+    into a sibling staging directory (`out_dir/.locations.tmp`) first, and
+    only once every partition has finalized successfully is that staging
+    directory swapped in for the live one (see `_swap_dataset_dir`). If any
+    partition fails, the staging directory is discarded and the previous
+    live dataset -- if any -- is left completely untouched, including its
+    `--partition-by` key set: kiln owns `out/locations/` exclusively, and a
+    re-run into the same `--out` (the normal nightly-refresh workflow) must
+    make each successful run's output an exact reflection of that run's
+    input, without ever leaving a torn mix of old and new partitions behind
+    if the run fails partway through.
+    """
+    if geo_types not in GEO_TYPE_FLAGS:
+        raise ValueError(f"geo_types must be one of {sorted(GEO_TYPE_FLAGS)}")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dataset_dir = out_dir / DATASET_DIR
+    backup_dir = out_dir / SWAP_BACKUP_DIR_NAME
+    new_dataset_dir = out_dir / STAGING_DIR_NAME
+
+    _reject_symlinked_dataset_dir(dataset_dir)
+    _recover_incomplete_swap(dataset_dir, backup_dir, new_dataset_dir)
+
+    new_dataset_dir.mkdir()
+    keys = list(partition_by)
+
+    completed = False
+    written: list[Path] = []
+    try:
+        if not frame.empty:
+            written = _write_all_partitions(
+                frame, keys, new_dataset_dir, report, row_group_size, geo_types
+            )
+        completed = True
+    finally:
+        if not completed:
+            shutil.rmtree(new_dataset_dir, ignore_errors=True)
+
+    _swap_dataset_dir(dataset_dir, backup_dir, new_dataset_dir)
+
+    return [dataset_dir / p.relative_to(new_dataset_dir) for p in written]

@@ -1,6 +1,7 @@
 import errno
 import json
 import os
+import subprocess
 
 import geopandas as gpd
 import numpy as np
@@ -11,7 +12,14 @@ import shapely
 
 from kiln.frame import ARROW_LIST_TYPES, INTEGER_COLUMNS, STRING_COLUMNS
 from kiln.report import Report
-from kiln.write import GdalUnavailable, PartitionWriteError, _finalize, probe_gdal, write_dataset
+from kiln.write import (
+    GdalUnavailable,
+    KilnWriteError,
+    PartitionWriteError,
+    _finalize,
+    probe_gdal,
+    write_dataset,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +216,90 @@ def test_a_slash_in_a_partition_value_is_sanitized_not_crashed(tmp_path):
     assert report.counts()["partition_value_sanitized"] == 1
 
 
+def test_two_distinct_values_that_collide_under_sanitization_land_in_separate_files(tmp_path):
+    """"A/B" and "A_B" both sanitize to "A_B" -- before disambiguation, the
+    second group's os.replace silently clobbered the first partition file,
+    discarding every row in it with no report entry at all. Both groups
+    must survive, in separate files, with the collision reported.
+    """
+    frame = a_frame(n_points=4, n_polygons=0)
+    frame["country"] = ["A/B", "A/B", "A_B", "A_B"]
+    report = Report()
+
+    written = write_dataset(frame, tmp_path, report, partition_by=("country",))
+
+    assert len(written) == 2
+    assert len({p.as_posix() for p in written}) == 2
+    total_rows = sum(len(gpd.read_parquet(p)) for p in written)
+    assert total_rows == 4  # no rows lost to the collision
+    assert report.counts()["partition_value_collision"] == 1
+
+
+def test_none_and_the_literal_string_null_collide_and_are_disambiguated(tmp_path):
+    """None (a real missing value) and the literal string "null" both
+    render as the "null" segment and used to collide the same way "A/B"
+    and "A_B" do.
+    """
+    frame = a_frame(n_points=4, n_polygons=0)
+    frame["grp"] = pd.array([None, None, "null", "null"], dtype="string")
+    report = Report()
+
+    written = write_dataset(frame, tmp_path, report, partition_by=("grp",))
+
+    assert len(written) == 2
+    total_rows = sum(len(gpd.read_parquet(p)) for p in written)
+    assert total_rows == 4
+    assert report.counts()["partition_value_collision"] == 1
+
+
+def test_a_symlinked_dataset_dir_raises_a_kiln_write_error_not_a_raw_oserror(tmp_path):
+    real_target = tmp_path / "elsewhere"
+    real_target.mkdir()
+    (tmp_path / "locations").symlink_to(real_target, target_is_directory=True)
+
+    with pytest.raises(KilnWriteError, match="symlink"):
+        write_dataset(a_frame(n_points=5, n_polygons=0), tmp_path, Report())
+
+
+def test_a_mid_run_failure_leaves_the_previous_good_dataset_completely_intact(
+    tmp_path, monkeypatch
+):
+    """Before the atomic swap, a failed rerun left the old dataset already
+    deleted (write_dataset cleared out/locations/ up front) and only
+    whichever new partitions had finalized before the failure on disk --
+    a plausible-looking but wrong partial dataset, silently. Now nothing
+    under out/locations/ may change at all unless every partition of the
+    new run succeeds.
+    """
+    write_dataset(a_frame(n_points=150, n_polygons=150), tmp_path, Report())
+    before = {
+        p.relative_to(tmp_path).as_posix(): p.stat().st_size for p in tmp_path.rglob("*.parquet")
+    }
+    assert before
+
+    real_run = subprocess.run
+    call_count = {"n": 0}
+
+    def flaky_run(cmd, *args, **kwargs):
+        if cmd[0] == "ogr2ogr":
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="synthetic failure")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", flaky_run)
+
+    with pytest.raises(PartitionWriteError):
+        write_dataset(a_frame(n_points=150, n_polygons=150), tmp_path, Report())
+
+    after = {
+        p.relative_to(tmp_path).as_posix(): p.stat().st_size for p in tmp_path.rglob("*.parquet")
+    }
+    assert after == before
+    assert not (tmp_path / ".locations.tmp").exists()
+    assert not (tmp_path / ".locations.old.tmp").exists()
+
+
 def test_rerunning_into_the_same_out_dir_replaces_the_dataset_not_doubles_it(tmp_path):
     write_dataset(a_frame(n_points=150, n_polygons=0), tmp_path, Report())
     first = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.parquet")}
@@ -219,6 +311,8 @@ def test_rerunning_into_the_same_out_dir_replaces_the_dataset_not_doubles_it(tmp
 
     second = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*.parquet")}
     assert second == {"locations/country=ZZ/geom_type=point/tier=site/part-0.parquet"}
+    assert not (tmp_path / ".locations.tmp").exists()
+    assert not (tmp_path / ".locations.old.tmp").exists()
 
 
 def test_rerunning_with_an_empty_frame_clears_the_previous_dataset(tmp_path):
