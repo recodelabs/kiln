@@ -1,5 +1,7 @@
 # kiln
 
+**New here? Read [ABOUT.md](ABOUT.md) first** — what kiln is for, with a worked example. This file is the command reference.
+
 Export FHIR `Location` resources to partitioned GeoParquet — native Parquet
 geometry types, per-row covering bbox, Hilbert-sorted row groups.
 
