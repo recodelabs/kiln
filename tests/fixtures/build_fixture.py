@@ -14,9 +14,12 @@ def loc(id_, name, type_, parent=None, pcode=None, position=None,
         boundary=None, boundary_url=None):
     r = {"resourceType": "Location", "id": id_, "name": name, "status": "active",
          "type": [{"coding": [{"code": type_}]}]}
-    if pcode: r["identifier"] = [{"system": P, "value": pcode}]
-    if parent: r["partOf"] = {"reference": f"Location/{parent}"}
-    if position: r["position"] = {"longitude": position[0], "latitude": position[1]}
+    if pcode:
+        r["identifier"] = [{"system": P, "value": pcode}]
+    if parent:
+        r["partOf"] = {"reference": f"Location/{parent}"}
+    if position:
+        r["position"] = {"longitude": position[0], "latitude": position[1]}
     if boundary:
         r["extension"] = [{"url": B, "valueAttachment": {
             "contentType": "application/geo+json", "data": b64(boundary)}}]
