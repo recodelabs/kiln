@@ -113,6 +113,27 @@ def test_nodes_excluded_by_the_hierarchy_are_absent_from_the_frame():
     assert frame.empty
 
 
+def test_empty_frame_column_order_is_deterministic_across_processes():
+    """DTYPE_MAP used to be built by iterating STRING_COLUMNS etc. (plain
+    sets) directly, so the empty frame's column order depended on Python's
+    per-process string hash seed instead of being stable across runs.
+    Building it from sorted(...) makes the order fixed and independently
+    verifiable here (each dtype group internally alphabetical), rather
+    than merely self-consistent with whatever DTYPE_MAP happens to be.
+    """
+    from kiln.frame import DTYPE_MAP, FLOAT_COLUMNS, INTEGER_COLUMNS, LIST_COLUMNS, STRING_COLUMNS
+
+    keys = list(DTYPE_MAP.keys())
+
+    assert [k for k in keys if k in STRING_COLUMNS] == sorted(STRING_COLUMNS)
+    assert [k for k in keys if k in INTEGER_COLUMNS] == sorted(INTEGER_COLUMNS)
+    assert [k for k in keys if k in FLOAT_COLUMNS] == sorted(FLOAT_COLUMNS)
+    assert [k for k in keys if k in LIST_COLUMNS] == sorted(LIST_COLUMNS)
+
+    empty = build_frame([], Report())
+    assert list(empty.columns) == keys + ["geometry"]
+
+
 def test_empty_frame_has_same_columns_as_populated_frame():
     populated = build_frame(tree(), Report())
     empty = build_frame([], Report())

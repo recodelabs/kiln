@@ -37,15 +37,16 @@ ARROW_LIST_TYPES = {
     ])),
 }
 
-# Build dtype dict for all columns except geometry
-DTYPE_MAP = {col: "string" for col in STRING_COLUMNS}
-DTYPE_MAP.update({col: "Int64" for col in INTEGER_COLUMNS})
-DTYPE_MAP.update({col: "float64" for col in FLOAT_COLUMNS})
-DTYPE_MAP.update({col: "object" for col in LIST_COLUMNS})
-
-# Column order: non-geometric columns first, then geometry
-COLUMN_ORDER = sorted(STRING_COLUMNS | INTEGER_COLUMNS | FLOAT_COLUMNS
-                      | LIST_COLUMNS) + ["geometry"]
+# Build dtype dict for all columns except geometry. Iterate each *_COLUMNS
+# set in sorted order rather than raw set order: set iteration order for
+# strings depends on the interpreter's hash seed, which is randomized per
+# process, so building this from unsorted sets would make the empty
+# frame's column order (see build_frame below) non-deterministic across
+# separate runs of kiln even though it's stable within any single run.
+DTYPE_MAP = {col: "string" for col in sorted(STRING_COLUMNS)}
+DTYPE_MAP.update({col: "Int64" for col in sorted(INTEGER_COLUMNS)})
+DTYPE_MAP.update({col: "float64" for col in sorted(FLOAT_COLUMNS)})
+DTYPE_MAP.update({col: "object" for col in sorted(LIST_COLUMNS)})
 
 
 def build_frame(
