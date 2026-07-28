@@ -1,5 +1,7 @@
 import json
+from pathlib import Path
 
+import kiln.cache as cache_module
 from kiln.cache import DEFAULT_CACHE_DIR, cache_key, cache_read, cache_write
 
 
@@ -101,6 +103,27 @@ def test_write_to_an_unwritable_directory_is_reported_not_raised(tmp_path):
         assert "could not write" in error
     finally:
         unwritable.chmod(0o755)  # so tmp_path cleanup can remove it
+
+
+def test_temp_file_is_created_inside_the_cache_directory_not_tmp(tmp_path, monkeypatch):
+    """os.replace is only atomic when the source and destination are on the
+    same filesystem -- a temp file created under /tmp (a different
+    filesystem than the cache dir on many systems) makes the final
+    os.replace raise EXDEV. This exact bug has bitten this codebase before,
+    so pin the temp file's parent to the cache directory itself."""
+    seen_dirs = []
+    real_mkstemp = cache_module.tempfile.mkstemp
+
+    def spy_mkstemp(*args, **kwargs):
+        seen_dirs.append(kwargs.get("dir"))
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(cache_module.tempfile, "mkstemp", spy_mkstemp)
+
+    cache_write(tmp_path, "https://files.test/a.geojson", b"payload")
+
+    assert seen_dirs  # mkstemp was actually invoked (twice: .bin, .meta.json)
+    assert all(Path(d) == tmp_path for d in seen_dirs)
 
 
 def test_no_partial_file_is_left_behind_after_a_write(tmp_path):
