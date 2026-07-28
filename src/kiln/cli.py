@@ -15,6 +15,7 @@ from kiln.extract import (
     write_ndjson,
 )
 from kiln.frame import build_frame
+from kiln.inspect import format_summary, summarize
 from kiln.profile import BOUNDARY_EXTENSION_URL, shred
 from kiln.report import Report, check_duplicate_pcodes, check_points_within_parents
 from kiln.shape import as_list
@@ -113,6 +114,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     return cmd_transform(args)
 
 
+def cmd_inspect(args: argparse.Namespace) -> int:
+    target = Path(args.out)
+    if not target.exists():
+        print(f"Directory not found: {target}", file=sys.stderr)
+        return USAGE_ERROR
+    print(format_summary(summarize(target)))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kiln", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -148,6 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--since", default=None)
     add_transform_options(run)
     run.set_defaults(func=cmd_run)
+
+    inspect_cmd = subparsers.add_parser("inspect", help="Summarize a written dataset")
+    inspect_cmd.add_argument("--out", required=True, help="Dataset directory")
+    inspect_cmd.set_defaults(func=cmd_inspect)
 
     return parser
 
