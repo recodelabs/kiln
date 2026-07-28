@@ -7,9 +7,11 @@ import pandas as pd
 import pytest
 
 from kiln.cli import main
+from kiln.profile import BOUNDARY_EXTENSION_URL
 from kiln.write import GdalUnavailable, probe_gdal
 
 FIXTURE = Path(__file__).parent / "fixtures" / "locations.ndjson"
+GEOJSON_BYTES = b'{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}'
 
 
 @pytest.fixture(autouse=True)
@@ -229,6 +231,29 @@ def _fhir_bundle_with_one_location() -> dict:
     }
 
 
+def _bundle_with_boundary_url() -> dict:
+    return {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Location",
+                    "id": "loc-1",
+                    "extension": [
+                        {
+                            "url": BOUNDARY_EXTENSION_URL,
+                            "valueAttachment": {
+                                "contentType": "application/geo+json",
+                                "url": "https://fhir.test/boundary/loc-1.geojson",
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+    }
+
+
 def _mock_transport_client(handler):
     """A drop-in httpx.Client that always talks to `handler` instead of the
     network, for monkeypatching over kiln.extract's `httpx.Client(...)`
@@ -261,6 +286,168 @@ def test_cmd_run_extracts_then_transforms_end_to_end(tmp_path, monkeypatch):
     assert (out / "locations.ndjson").exists()
     assert list(out.rglob("*.parquet"))
     assert read_all(out).iloc[0]["id"] == "loc-1"
+
+
+def test_cmd_extract_caches_boundaries_across_runs(tmp_path, monkeypatch):
+    """The cache flags are wired all the way through cmd_extract, not just
+    resolve_boundary_urls directly -- a warm second `kiln extract` run must
+    make zero HTTP requests for the boundary it already fetched."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "boundary" in request.url.path:
+            calls.append(request.url)
+            return httpx.Response(200, content=GEOJSON_BYTES)
+        return httpx.Response(200, json=_bundle_with_boundary_url())
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+    cache_dir = tmp_path / "cache"
+    out = tmp_path / "locations.ndjson"
+
+    code = main(
+        [
+            "extract",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--cache-dir", str(cache_dir),
+        ]
+    )
+    assert code == 0
+    assert len(calls) == 1
+
+    code = main(
+        [
+            "extract",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--cache-dir", str(cache_dir),
+        ]
+    )
+    assert code == 0
+    assert len(calls) == 1  # warm cache: no new boundary request
+
+
+def test_cmd_extract_no_cache_flag_disables_caching(tmp_path, monkeypatch):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "boundary" in request.url.path:
+            calls.append(request.url)
+            return httpx.Response(200, content=GEOJSON_BYTES)
+        return httpx.Response(200, json=_bundle_with_boundary_url())
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+    cache_dir = tmp_path / "cache"
+    out = tmp_path / "locations.ndjson"
+
+    for _ in range(2):
+        code = main(
+            [
+                "extract",
+                "--server", "https://fhir.test",
+                "--out", str(out),
+                "--cache-dir", str(cache_dir),
+                "--no-cache",
+            ]
+        )
+        assert code == 0
+
+    assert len(calls) == 2  # every run hit the network
+    assert not cache_dir.exists()
+
+
+def test_cmd_extract_refresh_flag_re_fetches_a_warm_entry(tmp_path, monkeypatch):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "boundary" in request.url.path:
+            calls.append(request.url)
+            return httpx.Response(200, content=GEOJSON_BYTES)
+        return httpx.Response(200, json=_bundle_with_boundary_url())
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+    cache_dir = tmp_path / "cache"
+    out = tmp_path / "locations.ndjson"
+
+    main(
+        [
+            "extract",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--cache-dir", str(cache_dir),
+        ]
+    )
+    assert len(calls) == 1
+
+    code = main(
+        [
+            "extract",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--cache-dir", str(cache_dir),
+            "--refresh",
+        ]
+    )
+    assert code == 0
+    assert len(calls) == 2  # refresh bypassed the warm cache
+
+
+def _bundle_with_many_boundary_urls(n: int) -> dict:
+    return {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Location",
+                    "id": f"loc-{i}",
+                    "extension": [
+                        {
+                            "url": BOUNDARY_EXTENSION_URL,
+                            "valueAttachment": {
+                                "contentType": "application/geo+json",
+                                "url": f"https://fhir.test/boundary/{i}.geojson",
+                            },
+                        }
+                    ],
+                }
+            }
+            for i in range(n)
+        ],
+    }
+
+
+def test_cmd_extract_aborts_cleanly_instead_of_hanging_on_a_systematically_down_host(
+    tmp_path, monkeypatch, capsys
+):
+    """A fully unreachable boundary host (wrong token, bad base URL, host
+    down) must not be retried thousands of times at TIMEOUT-per-attempt
+    cost -- --max-consecutive-failures should trip well before that, and
+    the CLI should exit with a clear message and no traceback, not hang."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "boundary" in request.url.path:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, json=_bundle_with_many_boundary_urls(50))
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+    out = tmp_path / "locations.ndjson"
+
+    code = main(
+        [
+            "extract",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--retries", "1",
+            "--concurrency", "1",
+            "--max-consecutive-failures", "5",
+        ]
+    )
+
+    assert code == 2
+    assert not out.exists()  # aborted -- nothing was written
+    err = capsys.readouterr().err
+    assert "kiln extract:" in err
+    assert "5 consecutive" in err
 
 
 def test_cmd_run_propagates_a_nonzero_exit_code_from_transform(tmp_path, monkeypatch):
