@@ -47,6 +47,28 @@ def test_normalize_folds_a_multi_feature_collection_and_warns():
     assert report.counts() == {"boundary_multi_feature": 1}
 
 
+def test_feature_collection_skips_a_non_dict_feature_and_keeps_the_valid_one():
+    payload = (
+        b'{"type":"FeatureCollection","features":['
+        b'"not-a-dict",'
+        b'{"type":"Feature","properties":{},"geometry":' + SQUARE + b"}]}"
+    )
+
+    geom = normalize_geojson(payload, "loc-1", Report())
+
+    assert geom.geom_type == "Polygon"
+
+
+def test_feature_collection_with_non_list_features_is_reported_as_unparseable():
+    report = Report()
+    payload = b'{"type":"FeatureCollection","features":"not-a-list"}'
+
+    result = normalize_geojson(payload, "loc-1", report)
+
+    assert result is None
+    assert report.counts() == {"boundary_unparseable": 1}
+
+
 def test_normalize_reports_unparseable_json():
     report = Report()
 

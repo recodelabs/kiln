@@ -162,6 +162,14 @@ def test_read_ndjson_accepts_a_compact_bundle_json_file(tmp_path):
     assert [r["id"] for r in read_ndjson(path)] == ["a", "b"]
 
 
+def test_read_ndjson_skips_a_non_list_bundle_entry_field(tmp_path):
+    """A Bundle.json with a non-list entry field must not crash iteration."""
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps({"resourceType": "Bundle", "entry": "not-a-list"}))
+
+    assert list(read_ndjson(path)) == []
+
+
 def test_resolve_malformed_binary_base64_is_reported_and_does_not_abort():
     """Test that malformed base64 in Binary data is reported without aborting."""
     report = Report()
@@ -280,6 +288,49 @@ def test_fetch_skips_non_dict_bundle_entries():
     assert ids == ["loc-1", "loc-2"]
 
 
+def test_fetch_raises_when_the_response_is_not_a_json_object():
+    """A server returning a bare JSON array instead of a Bundle must abort clearly."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": "not-a-bundle"}])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(RuntimeError, match="not a JSON object"):
+        list(fetch_locations("https://fhir.test", None, client=client))
+
+
+def test_fetch_skips_a_non_list_bundle_entry_field():
+    """A non-list Bundle.entry must not crash iteration."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"resourceType": "Bundle", "entry": "not-a-list"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    assert list(fetch_locations("https://fhir.test", None, client=client)) == []
+
+
+def test_fetch_ignores_a_next_link_missing_its_url():
+    """A next link with no url must stop pagination, not crash; entries still come through."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "resourceType": "Bundle",
+                "entry": [{"resource": {"id": "loc-1"}}],
+                "link": [{"relation": "next"}],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    ids = [r["id"] for r in fetch_locations("https://fhir.test", None, client=client)]
+
+    assert ids == ["loc-1"]
+
+
 def test_fetch_skips_non_dict_bundle_links():
     """Non-dict bundle links should be skipped without crashing."""
     def handler(request: httpx.Request) -> httpx.Response:
@@ -303,3 +354,100 @@ def test_fetch_skips_non_dict_bundle_links():
     ids = [r["id"] for r in fetch_locations("https://fhir.test", None, client=client)]
 
     assert ids == ["loc-1"]
+
+
+def test_resolve_skips_a_non_dict_resource_and_still_processes_the_rest():
+    """A non-dict item in the resource list must not crash the whole batch."""
+    report = Report()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    good = a_resource_with_boundary_url("https://files.test/a.geojson")
+    resources = ["not-a-dict-resource", good]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    attachment = resources[1]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def test_resolve_skips_a_non_dict_extension_entry_and_still_processes_the_rest():
+    """A non-dict extension entry must not abort resolution for the rest of it."""
+    report = Report()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resource = a_resource_with_boundary_url("https://files.test/a.geojson")
+    resource["extension"].insert(0, "not-a-dict")
+    resources = [resource]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    attachment = resources[0]["extension"][1]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def test_resolve_skips_a_non_list_extension_field_without_crashing():
+    """A non-list `extension` field must not crash iteration."""
+    report = Report()
+    resources = [{"id": "loc-1", "extension": "not-a-list"}]
+
+    resolve_boundary_urls(resources, report, client=httpx.Client())
+
+    assert resources == [{"id": "loc-1", "extension": "not-a-list"}]
+    assert report.counts() == {}
+
+
+def test_resolve_skips_a_non_dict_valueattachment_and_still_processes_the_rest():
+    """A non-dict valueAttachment must not abort resolution for the rest of it."""
+    report = Report()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    bad = {
+        "id": "loc-bad",
+        "extension": [{"url": BOUNDARY_EXTENSION_URL, "valueAttachment": "not-a-dict"}],
+    }
+    good = a_resource_with_boundary_url("https://files.test/a.geojson")
+    resources = [bad, good]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    attachment = resources[1]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def test_resolve_skips_a_non_string_boundary_url_without_crashing():
+    """A non-string attachment.url must not crash httpx; siblings still resolve."""
+    report = Report()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    bad = {
+        "id": "loc-bad",
+        "extension": [
+            {
+                "url": BOUNDARY_EXTENSION_URL,
+                "valueAttachment": {"contentType": "application/geo+json", "url": 42},
+            }
+        ],
+    }
+    good = a_resource_with_boundary_url("https://files.test/a.geojson")
+    resources = [bad, good]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert "data" not in resources[0]["extension"][0]["valueAttachment"]
+    attachment = resources[1]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON

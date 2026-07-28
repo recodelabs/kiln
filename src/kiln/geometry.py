@@ -10,6 +10,7 @@ import shapely.errors
 
 from kiln.profile import RawLocation
 from kiln.report import Report
+from kiln.shape import as_list
 
 POLYGON_TYPES = {"Polygon", "MultiPolygon"}
 
@@ -41,8 +42,8 @@ def normalize_geojson(payload: bytes, location_id: str, report: Report):
     if kind == "FeatureCollection":
         geometries = [
             feature.get("geometry")
-            for feature in parsed.get("features") or []
-            if feature.get("geometry")
+            for feature in as_list(parsed.get("features"))
+            if isinstance(feature, dict) and feature.get("geometry")
         ]
         if not geometries:
             report.add(

@@ -16,6 +16,7 @@ import httpx
 
 from kiln.profile import BOUNDARY_EXTENSION_URL, GEOJSON_CONTENT_TYPE
 from kiln.report import Report
+from kiln.shape import as_list
 
 PAGE_SIZE = 1000
 TIMEOUT = httpx.Timeout(60.0)
@@ -73,23 +74,34 @@ def fetch_locations(
                     f"FHIR request failed: {response.status_code} {response.text}"
                 )
             payload = response.json()
-            for entry in payload.get("entry") or []:
+            if not isinstance(payload, dict):
+                # A malformed page breaks pagination for every subsequent
+                # page too: this is a server/protocol fault, not a single
+                # bad record, so it aborts (like the sibling RuntimeErrors
+                # in this function) rather than being reported.
+                raise RuntimeError(  # noqa: TRY004 protocol fault, not a caller type error
+                    f"FHIR response was not a JSON object: {url}"
+                )
+
+            for entry in as_list(payload.get("entry")):
                 if isinstance(entry, dict) and entry.get("resource"):
                     yield entry["resource"]
 
-            next_link = next(
-                (
-                    link["url"]
-                    for link in payload.get("link") or []
-                    if isinstance(link, dict)
-                    and link.get("relation") == "next"
-                ),
-                None,
-            )
-            url, params = next_link, None
+            url, params = _next_page_url(payload), None
     finally:
         if owns_client:
             client.close()
+
+
+def _next_page_url(payload: dict) -> str | None:
+    """Pull `Bundle.link[relation=next].url`, tolerating a malformed link."""
+    for link in as_list(payload.get("link")):
+        if not isinstance(link, dict) or link.get("relation") != "next":
+            continue
+        url = link.get("url")
+        if isinstance(url, str) and url:
+            return url
+    return None
 
 
 def resolve_boundary_urls(
@@ -109,12 +121,32 @@ def resolve_boundary_urls(
 
     try:
         for resource in resources:
-            for extension in resource.get("extension") or []:
+            if not isinstance(resource, dict):
+                report.add("boundary_fetch_failed", "<unknown>", "resource is not a dict")
+                continue
+            location_id = resource.get("id", "<unknown>")
+
+            for extension in as_list(resource.get("extension")):
+                if not isinstance(extension, dict):
+                    report.add(
+                        "boundary_fetch_failed", location_id, "extension entry is not a dict"
+                    )
+                    continue
                 if extension.get("url") != BOUNDARY_EXTENSION_URL:
                     continue
-                attachment = extension.get("valueAttachment") or {}
+
+                value_attachment = extension.get("valueAttachment")
+                if not isinstance(value_attachment, dict):
+                    if value_attachment is not None:
+                        report.add(
+                            "boundary_fetch_failed",
+                            location_id,
+                            "extension valueAttachment is not a dict",
+                        )
+                    continue
+                attachment = value_attachment
                 url = attachment.get("url")
-                if not url or attachment.get("data"):
+                if not isinstance(url, str) or not url or attachment.get("data"):
                     continue
 
                 payload = _fetch_boundary(url, client, headers, resource, report)
@@ -205,7 +237,7 @@ def read_ndjson(path: Path) -> Iterator[dict]:
 
     # If it's a Bundle, explode the entries
     if isinstance(payload, dict) and payload.get("resourceType") == "Bundle":
-        for entry in payload.get("entry") or []:
+        for entry in as_list(payload.get("entry")):
             if isinstance(entry, dict) and entry.get("resource"):
                 yield entry["resource"]
         return

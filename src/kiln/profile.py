@@ -12,6 +12,8 @@ import base64
 import binascii
 from dataclasses import dataclass, field
 
+from kiln.shape import as_list
+
 BOUNDARY_EXTENSION_URL = (
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"
 )
@@ -66,7 +68,7 @@ def _first_coding_code(node: dict | list | None) -> str | None:
         node = node[0] if node else None
     if not isinstance(node, dict):
         return None
-    codings = node.get("coding") or []
+    codings = as_list(node.get("coding"))
     if codings and isinstance(codings[0], dict):
         return codings[0].get("code")
     return None
@@ -120,13 +122,32 @@ def _read_boundary(extension: dict, location_id: str, report) -> BoundaryRef | N
 
 
 def shred(resource: dict, report) -> RawLocation | None:
-    """Flatten one FHIR Location resource. Returns None if it has no id."""
+    """Flatten one FHIR Location resource. Returns None if it has no id.
+
+    `resource` is untrusted: it may have come straight off the wire (a
+    Bundle entry) or out of a local NDJSON file nobody has validated, so
+    even its top-level shape cannot be assumed.
+    """
+    if not isinstance(resource, dict):
+        report.add("malformed_field", "<unknown>", "Location resource is not a dict")
+        return None
+
     location_id = resource.get("id")
     if not location_id:
         report.add("missing_id", "<unknown>", "Location resource has no id")
         return None
+    if not isinstance(location_id, str):
+        report.add(
+            "malformed_field", "<unknown>", f"Location id is not a string: {location_id!r}"
+        )
+        return None
 
-    identifiers = resource.get("identifier") or []
+    identifiers = resource.get("identifier")
+    if identifiers is None:
+        identifiers = []
+    elif not isinstance(identifiers, list):
+        report.add("malformed_field", location_id, "identifier is not a list")
+        identifiers = []
 
     position = None
     if isinstance(resource.get("position"), dict):
@@ -171,7 +192,9 @@ def shred(resource: dict, report) -> RawLocation | None:
                 f"identifier[{i}] is not a dict",
             )
             continue
-        identifiers_list.append({"system": identifier.get("system"), "value": identifier.get("value")})
+        identifiers_list.append(
+            {"system": identifier.get("system"), "value": identifier.get("value")}
+        )
 
     raw = RawLocation(
         id=location_id,
@@ -187,7 +210,14 @@ def shred(resource: dict, report) -> RawLocation | None:
         last_updated=last_updated,
     )
 
-    for extension in resource.get("extension") or []:
+    extensions = resource.get("extension")
+    if extensions is None:
+        extensions = []
+    elif not isinstance(extensions, list):
+        report.add("malformed_field", location_id, "extension is not a list")
+        extensions = []
+
+    for extension in extensions:
         if not isinstance(extension, dict):
             report.add("malformed_field", location_id, "extension entry is not a dict")
             continue

@@ -336,6 +336,66 @@ def test_shred_guards_against_non_string_partof_reference():
     # Should succeed without error
 
 
+def test_shred_guards_against_a_non_dict_resource():
+    """A resource that isn't even a dict must be skipped, not raise."""
+    report = Report()
+
+    assert shred("not-a-dict-resource", report) is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_a_non_string_id():
+    """A non-string id would break downstream ancestor-path joins; skip it."""
+    report = Report()
+    resource = a_location(id=42)
+
+    assert shred(resource, report) is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_a_non_list_identifier_field():
+    """A non-list identifier field must not crash iteration; siblings survive."""
+    report = Report()
+    resource = a_location(identifier="not-a-list")
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.name == "Nassarawa"
+    assert raw.identifiers == []
+    assert raw.pcode is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_a_non_list_extension_field():
+    """A non-list extension field must not crash iteration; siblings survive."""
+    report = Report()
+    resource = a_location(extension="not-a-list")
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.pcode == "NG001002"
+    assert raw.boundary is None
+    assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_a_non_list_coding_field():
+    """A `type.coding` that isn't a list must not crash; siblings survive."""
+    report = Report()
+    resource = a_location(type=[{"coding": 5}])
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.name == "Nassarawa"
+    assert raw.loc_type is None
+    assert report.counts() == {}
+
+
 def test_shred_guards_against_non_string_overlays_reference():
     """Non-string overlays valueReference.reference should not crash."""
     report = Report()
