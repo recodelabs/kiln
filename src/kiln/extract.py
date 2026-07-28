@@ -9,8 +9,12 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import sys
+import time
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 
@@ -20,6 +24,23 @@ from kiln.shape import as_list
 
 PAGE_SIZE = 1000
 TIMEOUT = httpx.Timeout(60.0)
+
+# resolve_boundary_urls: concurrency and retry defaults, and the CLI flags
+# that override them.
+DEFAULT_CONCURRENCY = 8
+DEFAULT_RETRIES = 3
+
+# Exponential backoff between retry attempts: 0.5s, 1s, 2s, 4s, ...
+_RETRY_BASE_DELAY = 0.5
+# Cap on any single sleep -- including a server-supplied Retry-After -- so a
+# pathological server (a five-digit Retry-After, or just enough attempts)
+# cannot stall a run indefinitely.
+_RETRY_MAX_DELAY = 30.0
+
+# Below this many url-referenced boundaries, progress output is just noise --
+# a handful resolve near-instantly. Above it, print periodic progress to
+# stderr so a large run isn't silent for the whole time it's fetching.
+_PROGRESS_MIN_ITEMS = 50
 
 # The classic first line of a pretty-printed JSON object or array
 # (`json.dumps(..., indent=2)`): nothing else on the line. Used by
@@ -123,107 +144,260 @@ def _next_page_url(payload: dict) -> str | None:
     return None
 
 
+class _BoundaryFetch(NamedTuple):
+    """One url-referenced attachment queued for fetching.
+
+    `attachment` is the dict to mutate in place on success -- distinct per
+    item, so it can be written to from a worker thread with no risk of two
+    threads touching the same dict.
+    """
+
+    attachment: dict
+    location_id: str
+    url: str
+
+
 def resolve_boundary_urls(
     resources: list[dict],
     report: Report,
     token: str | None = None,
     client: httpx.Client | None = None,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    retries: int = DEFAULT_RETRIES,
 ) -> None:
     """Replace url-referenced boundary attachments with inline base64 data.
 
     Mutates `resources` in place. Failures are reported, never raised: one
     unreachable boundary must not lose the whole export.
+
+    The tree walk (finding which attachments need fetching) runs
+    single-threaded and reports its own shape problems (a non-dict
+    resource/extension/attachment) immediately, in resource order, exactly
+    as before. The fetches themselves run on up to `concurrency` worker
+    threads sharing one `httpx.Client` (thread-safe by design), each with up
+    to `retries` attempts and exponential backoff. Results are collected
+    back on this thread and applied to `report` in submission order, so two
+    runs over the same input produce identical `report.issues` regardless of
+    which thread happened to finish first.
     """
     owns_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT)
     headers = _headers(token)
 
     try:
-        for resource in resources:
-            if not isinstance(resource, dict):
-                report.add("boundary_fetch_failed", "<unknown>", "resource is not a dict")
-                continue
-            location_id = resource.get("id", "<unknown>")
-
-            for extension in as_list(resource.get("extension")):
-                if not isinstance(extension, dict):
-                    report.add(
-                        "boundary_fetch_failed", location_id, "extension entry is not a dict"
-                    )
-                    continue
-                if extension.get("url") != BOUNDARY_EXTENSION_URL:
-                    continue
-
-                value_attachment = extension.get("valueAttachment")
-                if not isinstance(value_attachment, dict):
-                    if value_attachment is not None:
-                        report.add(
-                            "boundary_fetch_failed",
-                            location_id,
-                            "extension valueAttachment is not a dict",
-                        )
-                    continue
-                attachment = value_attachment
-                url = attachment.get("url")
-                if not isinstance(url, str) or not url or attachment.get("data"):
-                    continue
-
-                payload = _fetch_boundary(url, client, headers, resource, report)
-                if payload is None:
-                    continue
-
-                attachment["data"] = base64.b64encode(payload).decode()
-                attachment.pop("url", None)
-                attachment.setdefault("contentType", GEOJSON_CONTENT_TYPE)
+        work = _collect_boundary_work(resources, report)
+        if work:
+            _resolve_boundary_work(work, client, headers, report, concurrency, retries)
     finally:
         if owns_client:
             client.close()
 
 
-def _fetch_boundary(
+def _collect_boundary_work(resources: list[dict], report: Report) -> list[_BoundaryFetch]:
+    """Walk resources -> extension -> valueAttachment, collecting fetch work.
+
+    Single-threaded. Shape problems found along the way (a non-dict
+    resource/extension/attachment) are reported here, immediately, exactly
+    as they were when this walk and the fetch were interleaved.
+    """
+    work: list[_BoundaryFetch] = []
+
+    for resource in resources:
+        if not isinstance(resource, dict):
+            report.add("boundary_fetch_failed", "<unknown>", "resource is not a dict")
+            continue
+        location_id = resource.get("id", "<unknown>")
+
+        for extension in as_list(resource.get("extension")):
+            if not isinstance(extension, dict):
+                report.add("boundary_fetch_failed", location_id, "extension entry is not a dict")
+                continue
+            if extension.get("url") != BOUNDARY_EXTENSION_URL:
+                continue
+
+            value_attachment = extension.get("valueAttachment")
+            if not isinstance(value_attachment, dict):
+                if value_attachment is not None:
+                    report.add(
+                        "boundary_fetch_failed",
+                        location_id,
+                        "extension valueAttachment is not a dict",
+                    )
+                continue
+            attachment = value_attachment
+            url = attachment.get("url")
+            if not isinstance(url, str) or not url or attachment.get("data"):
+                continue
+
+            work.append(_BoundaryFetch(attachment=attachment, location_id=location_id, url=url))
+
+    return work
+
+
+def _resolve_boundary_work(
+    work: list[_BoundaryFetch],
+    client: httpx.Client,
+    headers: dict[str, str],
+    report: Report,
+    concurrency: int,
+    retries: int,
+) -> None:
+    """Fetch every queued attachment concurrently and apply reports in order."""
+    max_workers = max(1, concurrency)
+    total = len(work)
+    progress = _ProgressReporter(total) if total >= _PROGRESS_MIN_ITEMS else None
+
+    resolved = 0
+    failed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submitting all of them up front (rather than as_completed) is what
+        # makes the report order deterministic: futures are resolved below
+        # in submission order, not completion order, regardless of which
+        # worker thread finishes first.
+        futures = [executor.submit(_resolve_one, item, client, headers, retries) for item in work]
+        for future in futures:
+            resolved += 1
+            failure = future.result()
+            if failure is not None:
+                failed += 1
+                report.add(*failure)
+            if progress:
+                progress.maybe_emit(resolved, failed)
+
+    if progress:
+        progress.emit_final(resolved, failed)
+
+
+def _resolve_one(
+    item: _BoundaryFetch,
+    client: httpx.Client,
+    headers: dict[str, str],
+    retries: int,
+) -> tuple[str, str, str] | None:
+    """Fetch one attachment; runs on a worker thread.
+
+    On success, mutates `item.attachment` directly -- safe because no other
+    thread ever touches this particular dict -- and returns None. On
+    failure, returns a `report.add(...)` call's arguments instead of calling
+    it directly, so the report is only ever mutated from the main thread.
+    """
+    payload, detail = _fetch_boundary_with_retry(item.url, client, headers, retries)
+    if payload is None:
+        return ("boundary_fetch_failed", item.location_id, detail)
+
+    item.attachment["data"] = base64.b64encode(payload).decode()
+    item.attachment.pop("url", None)
+    item.attachment.setdefault("contentType", GEOJSON_CONTENT_TYPE)
+    return None
+
+
+def _fetch_boundary_with_retry(
     url: str,
     client: httpx.Client,
     headers: dict[str, str],
-    resource: dict,
-    report: Report,
-) -> bytes | None:
-    location_id = resource.get("id", "<unknown>")
-    try:
-        response = client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        report.add("boundary_fetch_failed", location_id, f"{url}: {exc}")
-        return None
+    retries: int,
+) -> tuple[bytes | None, str | None]:
+    """Fetch `url`, retrying connection errors, 5xx and 429 with backoff.
 
-    if response.status_code != 200:
-        report.add(
-            "boundary_fetch_failed",
-            location_id,
-            f"{url}: HTTP {response.status_code}",
-        )
-        return None
+    A 404 (or any other 4xx) is not retried: it will still be missing on
+    the next attempt, and retrying it only multiplies the wait. Content-
+    level failures (an unparseable Binary, bad base64) are likewise not
+    retried -- the bytes came back fine, they just weren't usable.
+    """
+    attempts = max(1, retries)
+    detail: str | None = None
 
-    # The URL may point at a Binary resource rather than raw GeoJSON.
+    for attempt in range(1, attempts + 1):
+        try:
+            response = client.get(url, headers=headers)
+        except httpx.HTTPError as exc:
+            detail = f"{url}: {exc}"
+            if attempt < attempts:
+                time.sleep(_backoff_delay(attempt))
+                continue
+            return None, detail
+
+        if response.status_code == 429 or response.status_code >= 500:
+            detail = f"{url}: HTTP {response.status_code}"
+            if attempt < attempts:
+                retry_after = (
+                    _retry_after_seconds(response) if response.status_code == 429 else None
+                )
+                time.sleep(_backoff_delay(attempt, retry_after=retry_after))
+                continue
+            return None, detail
+
+        if response.status_code != 200:
+            # Any other 4xx: not retryable.
+            return None, f"{url}: HTTP {response.status_code}"
+
+        return _extract_boundary_payload(response, url)
+
+    return None, detail
+
+
+def _extract_boundary_payload(
+    response: httpx.Response, url: str
+) -> tuple[bytes | None, str | None]:
+    """Pull the boundary bytes out of a 200 response.
+
+    The URL may point at a Binary resource rather than raw GeoJSON.
+    """
     try:
         parsed = response.json()
     except ValueError:
-        return response.content
+        return response.content, None
 
     if isinstance(parsed, dict) and parsed.get("resourceType") == "Binary":
         data = parsed.get("data")
         if not data:
-            report.add("boundary_fetch_failed", location_id, f"{url}: Binary has no data")
-            return None
+            return None, f"{url}: Binary has no data"
         try:
-            return base64.b64decode(data, validate=True)
+            return base64.b64decode(data, validate=True), None
         except (binascii.Error, ValueError, TypeError) as exc:
-            report.add(
-                "boundary_fetch_failed",
-                location_id,
-                f"{url}: Binary data is not valid base64: {exc}",
-            )
-            return None
+            return None, f"{url}: Binary data is not valid base64: {exc}"
 
-    return response.content
+    return response.content, None
+
+
+def _backoff_delay(attempt: int, retry_after: float | None = None) -> float:
+    """Delay before the next attempt, capped so a pathological server (or a
+    huge Retry-After) can't stall a run indefinitely."""
+    delay = retry_after if retry_after is not None else _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+    return min(delay, _RETRY_MAX_DELAY)
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Parse a numeric `Retry-After` header, in seconds. None if absent or
+    not a plain number (the HTTP-date form falls back to exponential backoff
+    rather than being parsed here)."""
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+class _ProgressReporter:
+    """Periodic `resolved N/total (F failed)` lines to stderr for large runs."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        # ~20 updates across the run, regardless of size.
+        self.interval = max(1, total // 20)
+
+    def maybe_emit(self, resolved: int, failed: int) -> None:
+        if resolved % self.interval == 0:
+            self._emit(resolved, failed)
+
+    def emit_final(self, resolved: int, failed: int) -> None:
+        if resolved % self.interval != 0:
+            self._emit(resolved, failed)
+
+    def _emit(self, resolved: int, failed: int) -> None:
+        print(f"resolved {resolved}/{self.total} boundaries ({failed} failed)", file=sys.stderr)
 
 
 def write_ndjson(resources: Iterable[dict], path: Path) -> int:
