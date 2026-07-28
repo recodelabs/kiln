@@ -126,13 +126,22 @@ out/_report.json
 everything else — see [Schema](#schema) for why it's a separate column from
 `admin_level`. Every file holds a single geometry type.
 
+`transform` fully owns `out/locations/` and clears it before writing: every
+run's output is an exact reflection of that run's input, including the case
+where it resolves zero rows. This is what makes re-running `transform` (or
+`run`) into the same `--out` — the normal nightly-refresh workflow — safe:
+without it, a changed `--partition-by` key set (a `--country` change, an
+admin level disappearing from source, all polygons failing to resolve)
+would leave the previous run's partitions behind, and DuckDB/geopq-workbench
+would read the old and new rows as one indistinguishable layer.
+
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--country` | derived from the root admin-unit's pcode | Override the country partition value |
 | `--geo-types` | `both` | `both` = native Parquet geometry type, plus GeoParquet 1.1 sidecar metadata (`geo` key: version, geometry types, covering bbox). `only` = native geometry type with **no** GeoParquet sidecar metadata at all — `kiln inspect` and any other metadata-based reader will report `geo=None`, `covering=False`, empty `types=` for a perfectly valid file, so don't reach for `only` unless every downstream reader speaks native Arrow geometry types directly. `legacy` = plain WKB (no native geometry type), but *with* the GeoParquet 1.1 sidecar metadata — the most broadly compatible option |
-| `--partition-by` | `country,geom_type,tier` | Hive partition keys |
+| `--partition-by` | `country,geom_type,tier` | Hive partition keys. A null value (e.g. partitioning by the nullable `admin_level`) is written to its own `key=null` directory rather than dropping those rows. A value containing a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) is sanitized for the directory name and reported as `partition_value_sanitized`; the underlying data is untouched. An unknown column name exits with status 2 instead of a traceback |
 | `--row-group-size` | `20000` | Rows per Parquet row group |
 
 `kiln extract` also takes `--server` (required), `--token`, `--since`
@@ -209,21 +218,29 @@ identity.
 
 ## Data quality
 
-`out/_report.json` has a `counts` summary and a per-issue `issues` list
-(`kind`, `location_id`, `detail`). Some issues describe a row that still made
-it into the output (e.g. `duplicate_pcode`); others describe a row that was
-**omitted** — if you're counting rows against your source count, the gap is
-explained here. For every `boundary_*` decode failure, the boundary is
-simply discarded, not the Location: if `Location.position` is also present,
-the row still comes through as a point. Only when neither a boundary nor a
-position survives does the row disappear, and that always additionally
-raises `no_geometry` on the same Location — grep the report for that id to
-see which applies.
+`out/_report.json` has a `counts` summary, a per-issue `issues` list
+(`kind`, `location_id`, `detail`), and a `truncated` map. Some issues
+describe a row that still made it into the output (e.g. `duplicate_pcode`);
+others describe a row that was **omitted** — if you're counting rows
+against your source count, the gap is explained here. For every
+`boundary_*` decode failure, the boundary is simply discarded, not the
+Location: if `Location.position` is also present, the row still comes
+through as a point. Only when neither a boundary nor a position survives
+does the row disappear, and that always additionally raises `no_geometry`
+on the same Location — grep the report for that id to see which applies.
+
+`issues` retains at most 1000 entries per kind — a systematic fault (every
+row using the `(0, 0)` default coordinate, a swapped lat/lon) can otherwise
+raise one issue per row and produce a report larger than the dataset it
+describes. `counts` is always exact regardless of the cap; it's the number
+to act on. `truncated` maps `kind -> count omitted from issues` for any kind
+that hit the cap, and is empty when nothing did; `summary()`'s printed
+output likewise only mentions the cap when it actually triggers.
 
 | Kind | Row omitted? | Meaning |
 | --- | --- | --- |
 | `missing_id` | yes | The FHIR resource had no `id` (or a non-string one); dropped before any other processing |
-| `malformed_field` | usually no | A field documented as 0..\* or a specific shape arrived as something else (e.g. a string where a list was expected); the field is ignored and the Location keeps going. The one exception: a non-string `id` reports `malformed_field` *and* drops the resource entirely |
+| `malformed_field` | usually no | A field documented as 0..\* or a specific shape arrived as something else (e.g. a string where a list was expected); the field is ignored and the Location keeps going. The one exception: a non-string `id` reports `malformed_field` *and* drops the resource entirely. A malformed NDJSON line (invalid JSON) is also reported this way, with the 1-based line number in `detail`, and that line alone is skipped |
 | `orphan` | no | `partOf` references an id not present in the input; the Location is treated as a root |
 | `cycle` | yes | This Location is itself part of a `partOf` cycle |
 | `unreachable_ancestor` | yes | This Location's ancestor chain passes through a cycle elsewhere (collateral damage, not a cycle member itself) |
@@ -242,6 +259,7 @@ see which applies.
 | `boundary_fetch_failed` | n/a (raised in `extract`) | `kiln extract` could not fetch a url-referenced boundary (network/HTTP error, or a `Binary` resource with bad/missing data); the attachment is left as-is, so `transform` will separately report `boundary_unresolved_url` for it |
 | `boundary_unresolved_url` | only if no `position` | `transform` saw a url-only boundary it can't fetch offline; run `kiln extract` first |
 | `small_partition` | no | A written partition has fewer than `MIN_PARTITION_ROWS` (100) rows |
+| `partition_value_sanitized` | no | A `--partition-by` value contained a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) and was rewritten for the directory name; the underlying data column is untouched |
 
 ## Checking the output
 
