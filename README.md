@@ -77,6 +77,40 @@ never aborts the others; progress (`resolved 1200/50000 boundaries (14
 failed)`) prints to stderr for runs large enough to matter, so a
 multi-hour fetch isn't silent throughout.
 
+### Fetched boundaries are cached on disk
+
+Admin boundaries change rarely — once a year at most — so `extract` caches
+every successfully-fetched boundary attachment under `--cache-dir` (default
+`~/.cache/kiln/boundaries/`), keyed on a sha256 hash of its URL. A second
+run over the same registry reads the cache instead of the network and is
+correspondingly fast; a run that gets killed halfway through a large fetch
+picks up where it left off next time instead of re-fetching everything,
+as a side effect of the same mechanism.
+
+Only successful fetches are cached — a `404` today may be a working URL
+tomorrow, so caching a failure would turn a transient outage into a
+permanent one. `--no-cache` disables the cache entirely for one run
+(neither read nor written); `--refresh` ignores whatever is already
+cached and re-fetches everything, but still writes the fresh results back
+so the cache is warm again afterward. A cache problem — an unreadable or
+corrupt entry, an unwritable `--cache-dir` — is reported as `cache_error`
+and treated as a miss for that one boundary; it never aborts the run,
+same as a boundary that fails to fetch outright.
+
+Each entry is two files, `<hash>.bin` (the raw fetched bytes) and
+`<hash>.meta.json` (`url`, `fetched_at`, and a `sha256` of `.bin`, checked
+on every read to catch a truncated or corrupted file before it's used).
+The metadata file is what makes the cache directory debuggable instead of
+just a pile of anonymous hex-named files — `grep` it for a URL to find
+which entry it maps to and when it was fetched. Both files are written
+temp-file-then-`os.replace`, same as `write.py`'s partition writes, so two
+worker threads racing to fill the same cache entry can't leave behind a
+half-written file for a later run to read as if it were complete.
+
+Alongside the existing fetch progress, `extract` prints a one-line summary
+to stderr, e.g. `boundaries: 4820 cached, 180 fetched, 3 failed` — the
+only way to tell a fast run apart from one that just had nothing to do.
+
 ### `--in` must be NDJSON (or a single-line Bundle), not pretty-printed JSON
 
 `read_ndjson` streams the input line by line — deliberately, so a
@@ -202,7 +236,7 @@ exits with a clear error rather than crashing on the delete.
 | `--row-group-size` | `20000` | Rows per Parquet row group |
 
 `kiln extract` also takes `--server` (required), `--token`, `--since`
-(`_lastUpdated=gt<since>`) and `--out`, plus the two options below for
+(`_lastUpdated=gt<since>`) and `--out`, plus the options below for
 resolving url-referenced boundary attachments. `kiln run` takes the union of
 `extract`'s and `transform`'s options and writes the intermediate NDJSON to
 `<out>/locations.ndjson`.
@@ -211,6 +245,9 @@ resolving url-referenced boundary attachments. `kiln run` takes the union of
 | --- | --- | --- |
 | `--concurrency` | `8` | Worker threads fetching url-referenced boundary attachments concurrently, sharing one HTTP client |
 | `--retries` | `3` | Attempts per boundary fetch before giving up, with exponential backoff. Retries connection errors, `5xx`, and `429` (honouring `Retry-After` if present); a `404` or other non-retryable `4xx` is never retried |
+| `--cache-dir` | `~/.cache/kiln/boundaries/` | Local disk cache for fetched boundary attachments, keyed on a sha256 hash of each boundary's URL. A warm cache turns a second run over the same registry into a near-instant, no-network operation, and lets a killed-halfway run resume without re-fetching what it already has |
+| `--no-cache` | off | Disable the boundary cache entirely for this run — neither read nor write it |
+| `--refresh` | off | Ignore existing cache entries and re-fetch every boundary over the network, but still write the fresh results back so the cache is warm again afterward |
 
 ## Schema
 
@@ -321,6 +358,7 @@ output likewise only mentions the cap when it actually triggers.
 | `boundary_multi_feature` | no | A `FeatureCollection` had more than one feature; the geometries were unioned into one and used as-is |
 | `boundary_fetch_failed` | n/a (raised in `extract`) | `kiln extract` could not fetch a url-referenced boundary (network/HTTP error, or a `Binary` resource with bad/missing data); the attachment is left as-is, so `transform` will separately report `boundary_unresolved_url` for it |
 | `boundary_unresolved_url` | only if no `position` | `transform` saw a url-only boundary it can't fetch offline; run `kiln extract` first |
+| `cache_error` | n/a (raised in `extract`) | The on-disk boundary cache (`--cache-dir`) hit a problem for this one boundary — an unreadable/corrupt cache entry, or an unwritable cache directory. Treated as a cache miss: the boundary is (re-)fetched over the network as if it hadn't been cached at all, so this never stops the boundary itself from resolving |
 | `small_partition` | no | A written partition has fewer than `MIN_PARTITION_ROWS` (100) rows |
 | `partition_value_sanitized` | no | A `--partition-by` value contained a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) and was rewritten for the directory name; the underlying data column is untouched |
 | `partition_value_collision` | no | Two distinct `--partition-by` values rendered to the *same* directory segment (e.g. `"A/B"` and `"A_B"` both sanitizing to `A_B`; `None` and the literal string `"null"` both rendering as `null`) — the second was given a short hash suffix (e.g. `A_B~e466256d`) so both are written to separate files instead of one silently overwriting the other |

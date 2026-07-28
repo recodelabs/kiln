@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from kiln import __version__
+from kiln.cache import DEFAULT_CACHE_DIR
 from kiln.extract import (
     DEFAULT_CONCURRENCY,
     DEFAULT_RETRIES,
@@ -60,6 +61,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
         token=args.token,
         concurrency=args.concurrency,
         retries=args.retries,
+        cache_dir=None if args.no_cache else args.cache_dir,
+        refresh=args.refresh,
     )
     count = write_ndjson(resources, Path(args.out))
     print(f"Wrote {count} Locations to {args.out}")
@@ -147,6 +150,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         out=str(ndjson),
         concurrency=args.concurrency,
         retries=args.retries,
+        cache_dir=args.cache_dir,
+        no_cache=args.no_cache,
+        refresh=args.refresh,
     )
     code = cmd_extract(extract_args)
     if code != 0:
@@ -193,6 +199,26 @@ def build_parser() -> argparse.ArgumentParser:
             type=int,
             default=DEFAULT_RETRIES,
             help="Attempts per boundary fetch before giving up (with backoff)",
+        )
+        sub.add_argument(
+            "--cache-dir",
+            dest="cache_dir",
+            default=str(DEFAULT_CACHE_DIR),
+            help=f"Local disk cache for fetched boundaries (default: {DEFAULT_CACHE_DIR})",
+        )
+        sub.add_argument(
+            "--no-cache",
+            dest="no_cache",
+            action="store_true",
+            help="Disable the boundary cache entirely -- neither read nor write it",
+        )
+        sub.add_argument(
+            "--refresh",
+            action="store_true",
+            help=(
+                "Ignore existing cache entries and re-fetch every boundary, "
+                "still writing results back to the cache"
+            ),
         )
 
     extract = subparsers.add_parser("extract", help="Fetch Locations from a FHIR server")
