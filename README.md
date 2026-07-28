@@ -59,6 +59,27 @@ extract` first (or use `kiln run`); that is the step that fetches
 url-referenced boundaries and inlines them as base64 `data` before anything
 is written to NDJSON.
 
+### `--in` must be NDJSON (or a single-line Bundle), not pretty-printed JSON
+
+`read_ndjson` streams the input line by line — deliberately, so a
+multi-gigabyte file with base64-inlined boundaries is never held in memory
+twice over. That means a **pretty-printed, multi-line** FHIR Bundle (e.g.
+`json.dumps(bundle, indent=2)`, or anything a text editor's "format
+document" produced) is not readable input: every line fails to parse as its
+own JSON value. `transform` detects this specific shape up front (the first
+non-blank line being just `{` or `[`, with nothing else on it) and exits
+immediately with status 2 and a clear message, rather than reporting a pile
+of `malformed_field` issues for every line and exiting 0 as if it had
+legitimately resolved zero rows. That distinction matters because
+`transform` fully owns `out/locations/` — a silently "successful" empty run
+would otherwise replace a user's previous good export with nothing, for an
+input kiln simply cannot read. Compact the file first if you hit this, e.g.
+`jq -c . input.json > input.ndjson`.
+
+A single-line Bundle (exactly what `kiln extract`/`write_ndjson` produce) is
+still supported — only a Bundle reformatted across multiple lines afterward
+is not.
+
 ## Verified example
 
 Running `transform` against the test fixture (`tests/fixtures/locations.ndjson`,
@@ -126,14 +147,32 @@ out/_report.json
 everything else — see [Schema](#schema) for why it's a separate column from
 `admin_level`. Every file holds a single geometry type.
 
-`transform` fully owns `out/locations/` and clears it before writing: every
-run's output is an exact reflection of that run's input, including the case
-where it resolves zero rows. This is what makes re-running `transform` (or
-`run`) into the same `--out` — the normal nightly-refresh workflow — safe:
-without it, a changed `--partition-by` key set (a `--country` change, an
-admin level disappearing from source, all polygons failing to resolve)
-would leave the previous run's partitions behind, and DuckDB/geopq-workbench
-would read the old and new rows as one indistinguishable layer.
+`transform` fully owns `out/locations/`: every run's output *replaces* it as
+one atomic unit, so every successful run's output is an exact reflection of
+that run's input, including the case where it resolves zero rows. This is
+what makes re-running `transform` (or `run`) into the same `--out` — the
+normal nightly-refresh workflow — safe: without it, a changed
+`--partition-by` key set (a `--country` change, an admin level disappearing
+from source, all polygons failing to resolve) would leave the previous
+run's partitions behind, and DuckDB/geopq-workbench would read the old and
+new rows as one indistinguishable layer.
+
+The replacement is atomic, not clear-then-write: every partition is written
+into a hidden staging directory (`out/.locations.tmp/`) first, and only once
+*every* partition has finalized successfully is that staging directory
+swapped in for `out/locations/`. If any partition fails partway through —
+`ogr2ogr` crashing, a disk filling up — the staging directory is discarded
+and the previous `out/locations/`, if any, is left completely untouched, not
+a mix of old and new partitions. `out/_report.json` is deleted at the same
+point the write is attempted, before anything else, so a failed run never
+leaves behind a report that still describes an old, unrelated successful
+run as if it were current; on success it's rewritten to describe exactly
+what's now on disk. (A run that fails *before* attempting the write at all —
+a bad `--partition-by` column, a missing GDAL — never touches either the
+dataset or the report, same as before.)
+
+If `out/locations` is a symlink, `transform` refuses to run through it and
+exits with a clear error rather than crashing on the delete.
 
 ## Options
 
@@ -141,7 +180,7 @@ would read the old and new rows as one indistinguishable layer.
 | --- | --- | --- |
 | `--country` | derived from the root admin-unit's pcode | Override the country partition value |
 | `--geo-types` | `both` | `both` = native Parquet geometry type, plus GeoParquet 1.1 sidecar metadata (`geo` key: version, geometry types, covering bbox). `only` = native geometry type with **no** GeoParquet sidecar metadata at all — `kiln inspect` and any other metadata-based reader will report `geo=None`, `covering=False`, empty `types=` for a perfectly valid file, so don't reach for `only` unless every downstream reader speaks native Arrow geometry types directly. `legacy` = plain WKB (no native geometry type), but *with* the GeoParquet 1.1 sidecar metadata — the most broadly compatible option |
-| `--partition-by` | `country,geom_type,tier` | Hive partition keys. A null value (e.g. partitioning by the nullable `admin_level`) is written to its own `key=null` directory rather than dropping those rows. A value containing a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) is sanitized for the directory name and reported as `partition_value_sanitized`; the underlying data is untouched. An unknown column name exits with status 2 instead of a traceback |
+| `--partition-by` | `country,geom_type,tier` | Hive partition keys. A null value (e.g. partitioning by the nullable `admin_level`) is written to its own `key=null` directory rather than dropping those rows. A value containing a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) is sanitized for the directory name and reported as `partition_value_sanitized`; the underlying data is untouched. If two distinct values sanitize (or otherwise render) to the *same* directory segment — `"A/B"` and `"A_B"` both become `A_B`; `None` and the literal string `"null"` both become `null` — the second one gets a short hash suffix appended (e.g. `A_B~e466256d`) so they never collide on disk, and this is reported as `partition_value_collision`. An unknown column name exits with status 2 instead of a traceback. Partitioning by an integer column (e.g. the raw `admin_level` rather than the string `tier`) is accepted and written correctly, but breaks reading the output back with `pyarrow.dataset(..., partitioning="hive")` — see [Known reader gotchas](#known-reader-gotchas) |
 | `--row-group-size` | `20000` | Rows per Parquet row group |
 
 `kiln extract` also takes `--server` (required), `--token`, `--since`
@@ -260,10 +299,26 @@ output likewise only mentions the cap when it actually triggers.
 | `boundary_unresolved_url` | only if no `position` | `transform` saw a url-only boundary it can't fetch offline; run `kiln extract` first |
 | `small_partition` | no | A written partition has fewer than `MIN_PARTITION_ROWS` (100) rows |
 | `partition_value_sanitized` | no | A `--partition-by` value contained a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) and was rewritten for the directory name; the underlying data column is untouched |
+| `partition_value_collision` | no | Two distinct `--partition-by` values rendered to the *same* directory segment (e.g. `"A/B"` and `"A_B"` both sanitizing to `A_B`; `None` and the literal string `"null"` both rendering as `null`) — the second was given a short hash suffix (e.g. `A_B~e466256d`) so both are written to separate files instead of one silently overwriting the other |
 
 ## Checking the output
 
 [geopq-workbench](https://github.com/gsueur/geopq-workbench) opens the output
 directory as a single layer and has a quality gate for exactly the properties
 kiln targets — spatial index present, row-group clustering, sensible row-group
-sizes.
+size
+
+## Known reader gotchas
+
+- **Partitioning by an integer column breaks hive-partitioned reads.**
+  `--partition-by` on a column that also survives into the row data itself
+  as a genuine integer (e.g. the raw `admin_level`, as opposed to the
+  string `tier` that exists specifically to avoid this) writes correctly,
+  but `pyarrow.dataset(path, partitioning="hive")` — what `kiln inspect`
+  and most other readers use — infers the partition column's type from the
+  *directory name* (a string) and the *in-file* column's type (`Int64`)
+  independently, and refuses to reconcile them:
+  `ArrowTypeError: ... incompatible types ...`. This is pre-existing (not
+  introduced by this change) and not fixed here; use `tier`, or another
+  string column, for hive partitioning, and reserve integer columns like
+  `admin_level`/`depth` for in-file filtering only.s.
