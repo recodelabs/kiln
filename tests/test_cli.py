@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import geopandas as gpd
+import httpx
 import pandas as pd
 import pytest
 
@@ -109,3 +110,103 @@ def test_missing_input_file_exits_with_code_two(tmp_path, capsys):
 
     assert code == 2
     assert "not found" in capsys.readouterr().err
+
+
+def test_partition_by_an_unknown_column_exits_with_code_two_not_a_traceback(tmp_path, capsys):
+    code = main(
+        ["transform", "--in", str(FIXTURE), "--out", str(tmp_path), "--partition-by", "nosuchcol"]
+    )
+
+    assert code == 2
+    assert "nosuchcol" in capsys.readouterr().err
+
+
+def test_rerunning_transform_into_the_same_out_replaces_stale_partitions(tmp_path):
+    """A nightly refresh -- the normal way this tool is used -- re-runs
+    transform into the same --out. Nothing used to clear out/locations/
+    first, so a changed key set (here, --country) left the old partitions
+    behind and the dataset silently doubled.
+    """
+    out = tmp_path / "out"
+    main(["transform", "--in", str(FIXTURE), "--out", str(out)])
+    first_rows = len(read_all(out))
+
+    main(["transform", "--in", str(FIXTURE), "--out", str(out), "--country", "ZZ"])
+    second = read_all(out)
+
+    assert len(second) == first_rows
+    assert set(second["country"]) == {"ZZ"}
+
+
+def _fhir_bundle_with_one_location() -> dict:
+    return {
+        "resourceType": "Bundle",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Location",
+                    "id": "loc-1",
+                    "position": {"longitude": 3.0, "latitude": 6.0},
+                }
+            }
+        ],
+    }
+
+
+def _mock_transport_client(handler):
+    """A drop-in httpx.Client that always talks to `handler` instead of the
+    network, for monkeypatching over kiln.extract's `httpx.Client(...)`
+    calls (cmd_extract/cmd_run construct their own client and don't accept
+    one as an argument, unlike the lower-level extract.py functions).
+    """
+
+    class _FakeClient(httpx.Client):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    return _FakeClient
+
+
+def test_cmd_run_extracts_then_transforms_end_to_end(tmp_path, monkeypatch):
+    """cmd_run has zero coverage even though it's the headline command: it
+    wires cmd_extract's output ndjson straight into cmd_transform's input.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_fhir_bundle_with_one_location())
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+
+    out = tmp_path / "out"
+    code = main(["run", "--server", "https://fhir.test", "--out", str(out)])
+
+    assert code == 0
+    assert (out / "locations.ndjson").exists()
+    assert list(out.rglob("*.parquet"))
+    assert read_all(out).iloc[0]["id"] == "loc-1"
+
+
+def test_cmd_run_propagates_a_nonzero_exit_code_from_transform(tmp_path, monkeypatch):
+    """extract succeeding must not mask transform failing: run's exit code
+    is the one the caller (and any nightly-job monitoring) checks.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_fhir_bundle_with_one_location())
+
+    monkeypatch.setattr(httpx, "Client", _mock_transport_client(handler))
+
+    out = tmp_path / "out"
+    code = main(
+        [
+            "run",
+            "--server", "https://fhir.test",
+            "--out", str(out),
+            "--partition-by", "nosuchcolumn",
+        ]
+    )
+
+    assert code == 2
+    assert (out / "locations.ndjson").exists()  # extract's half did complete
+    assert not list(out.rglob("*.parquet"))  # transform's half did not

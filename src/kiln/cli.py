@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def cmd_transform(args: argparse.Namespace) -> int:
         return USAGE_ERROR
 
     report = Report()
-    resources = list(read_ndjson(source))
+    resources = list(read_ndjson(source, report))
     _note_unresolved_boundary_urls(resources, report)
 
     locations = [loc for loc in (shred(r, report) for r in resources) if loc is not None]
@@ -80,13 +81,23 @@ def cmd_transform(args: argparse.Namespace) -> int:
         check_duplicate_pcodes(frame, report)
         check_points_within_parents(frame, report)
 
+    partition_by = tuple(args.partition_by.split(","))
+    unknown_keys = [key for key in partition_by if key not in frame.columns]
+    if unknown_keys:
+        print(
+            f"--partition-by: unknown column(s) {', '.join(unknown_keys)}. "
+            f"Available columns: {', '.join(sorted(frame.columns))}",
+            file=sys.stderr,
+        )
+        return USAGE_ERROR
+
     out_dir = Path(args.out)
     try:
         written = write_dataset(
             frame,
             out_dir,
             report,
-            partition_by=tuple(args.partition_by.split(",")),
+            partition_by=partition_by,
             row_group_size=args.row_group_size,
             geo_types=args.geo_types,
         )
@@ -169,8 +180,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-
-    import os
 
     if getattr(args, "token", None) is None:
         args.token = os.environ.get("KILN_TOKEN")
