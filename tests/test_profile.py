@@ -304,3 +304,53 @@ def test_shred_guards_against_non_dict_overlays_valuereference():
     assert raw.id == "loc-1"
     assert raw.overlays_admin_unit_ids == []
     assert report.counts() == {"malformed_field": 1}
+
+
+def test_shred_guards_against_non_dict_coding_in_type():
+    """Non-dict coding[0] in type should not crash; type should be None."""
+    report = Report()
+    resource = a_location(
+        type=[{"coding": ["not-a-dict"]}],
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.loc_type is None
+    # Should succeed without error, no report entry for this
+
+
+def test_shred_guards_against_non_string_partof_reference():
+    """Non-string partOf.reference should not crash; parent_id should be None."""
+    report = Report()
+    resource = a_location(
+        partOf={"reference": 42},
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.parent_id is None
+    # Should succeed without error
+
+
+def test_shred_guards_against_non_string_overlays_reference():
+    """Non-string overlays valueReference.reference should not crash."""
+    report = Report()
+    resource = a_location(
+        extension=[
+            {
+                "url": OVERLAYS_EXTENSION_URL,
+                "valueReference": {"reference": {"key": "value"}},
+            }
+        ]
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.overlays_admin_unit_ids == []
+    # Should succeed without error

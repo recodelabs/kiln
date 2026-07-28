@@ -257,3 +257,49 @@ def test_fetch_raises_on_excessive_pagination():
 
     with pytest.raises(RuntimeError, match="Exceeded maximum pagination limit"):
         list(fetch_locations("https://fhir.test", None, client=client))
+
+
+def test_fetch_skips_non_dict_bundle_entries():
+    """Non-dict bundle entries should be skipped without crashing."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={
+                "resourceType": "Bundle",
+                "entry": [
+                    {"resource": {"id": "loc-1"}},
+                    "not-a-dict",
+                    {"resource": {"id": "loc-2"}},
+                ],
+            }
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    ids = [r["id"] for r in fetch_locations("https://fhir.test", None, client=client)]
+
+    assert ids == ["loc-1", "loc-2"]
+
+
+def test_fetch_skips_non_dict_bundle_links():
+    """Non-dict bundle links should be skipped without crashing."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Return bundle with non-dict link entries, but don't follow them
+        # (only test that non-dict links are skipped without crashing)
+        return httpx.Response(
+            200, json={
+                "resourceType": "Bundle",
+                "entry": [{"resource": {"id": "loc-1"}}],
+                "link": [
+                    "not-a-dict",
+                    42,
+                    {"relation": "other", "url": "https://fhir.test/Location"},
+                ],
+            }
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    # Main test: fetching doesn't crash with non-dict links
+    ids = [r["id"] for r in fetch_locations("https://fhir.test", None, client=client)]
+
+    assert ids == ["loc-1"]

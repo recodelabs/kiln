@@ -67,12 +67,14 @@ def _first_coding_code(node: dict | list | None) -> str | None:
     if not isinstance(node, dict):
         return None
     codings = node.get("coding") or []
-    return codings[0].get("code") if codings else None
+    if codings and isinstance(codings[0], dict):
+        return codings[0].get("code")
+    return None
 
 
 def _strip_reference(reference: str | None) -> str | None:
     """`Location/loc-1` -> `loc-1`. Bare ids pass through unchanged."""
-    if not reference:
+    if not reference or not isinstance(reference, str):
         return None
     return reference.rsplit("/", 1)[-1]
 

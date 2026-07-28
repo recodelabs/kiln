@@ -74,14 +74,15 @@ def fetch_locations(
                 )
             payload = response.json()
             for entry in payload.get("entry") or []:
-                if entry.get("resource"):
+                if isinstance(entry, dict) and entry.get("resource"):
                     yield entry["resource"]
 
             next_link = next(
                 (
                     link["url"]
                     for link in payload.get("link") or []
-                    if link.get("relation") == "next"
+                    if isinstance(link, dict)
+                    and link.get("relation") == "next"
                 ),
                 None,
             )
@@ -205,7 +206,7 @@ def read_ndjson(path: Path) -> Iterator[dict]:
     # If it's a Bundle, explode the entries
     if isinstance(payload, dict) and payload.get("resourceType") == "Bundle":
         for entry in payload.get("entry") or []:
-            if entry.get("resource"):
+            if isinstance(entry, dict) and entry.get("resource"):
                 yield entry["resource"]
         return
 
