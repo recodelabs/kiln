@@ -292,6 +292,16 @@ def _resolve_boundary_work(
         ]
         for future in futures:
             resolved += 1
+            # future.result() re-raises whatever escaped _resolve_one on its
+            # worker thread. Nothing catches that here -- so it propagates
+            # straight out of resolve_boundary_urls, destroying the export,
+            # exactly as a negative Retry-After (ValueError from time.sleep)
+            # or a malformed boundary URL (httpx.InvalidURL) used to before
+            # both were fixed at the source. _resolve_one's job is to turn
+            # every failure mode it can anticipate into a `_FetchOutcome`
+            # instead of letting it raise; if a future change adds a new way
+            # for it to fail, it must do the same, or it will be invisible
+            # right here, same as those two were.
             outcome = future.result()
             if outcome.cached:
                 cached += 1
@@ -392,6 +402,14 @@ def _fetch_boundary_with_retry(
     the next attempt, and retrying it only multiplies the wait. Content-
     level failures (an unparseable Binary, bad base64) are likewise not
     retried -- the bytes came back fine, they just weren't usable.
+
+    A `Retry-After` header is honoured on *any* retryable status (429 or
+    5xx), not just 429 -- a 503 with `Retry-After` is just as real a signal
+    from the server as a 429 with one, and this is what the README already
+    documents. Only the numeric-seconds form is parsed; the HTTP-date form
+    (e.g. `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`) is not recognized
+    and falls back to exponential backoff instead (see
+    `_retry_after_seconds`).
     """
     attempts = max(1, retries)
     detail: str | None = None
@@ -399,7 +417,14 @@ def _fetch_boundary_with_retry(
     for attempt in range(1, attempts + 1):
         try:
             response = client.get(url, headers=headers)
-        except httpx.HTTPError as exc:
+        # httpx.InvalidURL (e.g. a malformed port in the URL) is a plain
+        # Exception subclass, not an httpx.HTTPError, so it slipped past
+        # this catch before -- as would a stray ValueError/OSError from a
+        # misbehaving transport. Any of these, left uncaught, propagates out
+        # of _resolve_one and destroys the whole export (see the comment at
+        # the future.result() call site in _resolve_boundary_work) for what
+        # should be one reported, skippable boundary failure.
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError, OSError) as exc:
             detail = f"{url}: {exc}"
             if attempt < attempts:
                 time.sleep(_backoff_delay(attempt))
@@ -409,9 +434,7 @@ def _fetch_boundary_with_retry(
         if response.status_code == 429 or response.status_code >= 500:
             detail = f"{url}: HTTP {response.status_code}"
             if attempt < attempts:
-                retry_after = (
-                    _retry_after_seconds(response) if response.status_code == 429 else None
-                )
+                retry_after = _retry_after_seconds(response)
                 time.sleep(_backoff_delay(attempt, retry_after=retry_after))
                 continue
             return None, detail
@@ -450,10 +473,19 @@ def _extract_boundary_payload(
 
 
 def _backoff_delay(attempt: int, retry_after: float | None = None) -> float:
-    """Delay before the next attempt, capped so a pathological server (or a
-    huge Retry-After) can't stall a run indefinitely."""
+    """Delay before the next attempt, clamped to `[0, _RETRY_MAX_DELAY]`.
+
+    The upper bound guards against a pathological server (or a huge
+    Retry-After, e.g. `Retry-After: 99999`) stalling a run indefinitely. The
+    lower bound guards against the opposite: a server sending a *negative*
+    Retry-After (`Retry-After: -5`) would otherwise reach `time.sleep()`
+    with a negative argument, which raises `ValueError` -- escaping this
+    function, the worker, and (before the fix now catching it too)
+    `resolve_boundary_urls` itself, turning one hostile response into a
+    dead run instead of one reported boundary failure.
+    """
     delay = retry_after if retry_after is not None else _RETRY_BASE_DELAY * (2 ** (attempt - 1))
-    return min(delay, _RETRY_MAX_DELAY)
+    return max(0.0, min(delay, _RETRY_MAX_DELAY))
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:

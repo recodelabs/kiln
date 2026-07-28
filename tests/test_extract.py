@@ -899,3 +899,110 @@ def test_concurrent_workers_racing_on_the_same_url_do_not_corrupt_the_cache_entr
     payload, error = cache_read(cache_dir, url)
     assert error is None
     assert payload == GEOJSON
+
+
+# --- Retry-After edge cases -------------------------------------------------
+
+
+def test_backoff_delay_is_capped_at_retry_max_delay():
+    """The cap is the only defence against a hostile Retry-After (e.g.
+    Retry-After: 99999) stalling a run indefinitely."""
+    assert extract_module._backoff_delay(10) == extract_module._RETRY_MAX_DELAY
+    assert extract_module._backoff_delay(1, retry_after=99999) == extract_module._RETRY_MAX_DELAY
+
+
+def test_backoff_delay_clamps_a_negative_retry_after_to_zero():
+    """A negative Retry-After must never reach time.sleep() -- it raises
+    ValueError there, which used to escape all the way out of
+    resolve_boundary_urls and abort the whole export."""
+    assert extract_module._backoff_delay(1, retry_after=-5) == 0.0
+
+
+def test_resolve_survives_a_negative_retry_after_header(monkeypatch):
+    """A 429 with Retry-After: -5 must not crash the run: the negative value
+    is clamped, the boundary is retried, and the run completes normally."""
+    sleeps = []
+    monkeypatch.setattr(extract_module.time, "sleep", sleeps.append)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "-5"}, text="slow down")
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert len(calls) == 2
+    assert sleeps == [0.0]  # clamped, not passed through raw and negative
+    assert report.counts() == {}
+    attachment = resources[0]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def test_resolve_survives_a_non_numeric_retry_after_header(monkeypatch):
+    """An unparseable Retry-After must not crash the run either -- it falls
+    back to exponential backoff instead."""
+    sleeps = []
+    monkeypatch.setattr(extract_module.time, "sleep", sleeps.append)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "not-a-number"}, text="slow down")
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert len(calls) == 2
+    assert sleeps == [0.5]  # first exponential backoff step, not a crash
+    assert report.counts() == {}
+
+
+def test_resolve_honours_retry_after_on_503_too(monkeypatch):
+    """README already claimed Retry-After is honoured for all retries, not
+    just 429 -- the code must match that, and 503 is the other common
+    source of this header."""
+    sleeps = []
+    monkeypatch.setattr(extract_module.time, "sleep", sleeps.append)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(503, headers={"Retry-After": "7"}, text="unavailable")
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert len(calls) == 2
+    assert sleeps == [7.0]
+    assert report.counts() == {}
+
+
+def test_resolve_reports_a_malformed_boundary_url_instead_of_crashing():
+    """httpx.InvalidURL (e.g. an unparseable port) is a plain Exception
+    subclass, not an httpx.HTTPError -- it used to escape the retry loop's
+    narrower except clause entirely and abort the whole export."""
+    report = Report()
+    resources = [a_resource_with_boundary_url("http://host:notaport/x")]
+    client = httpx.Client()  # InvalidURL is raised client-side, no network needed
+
+    resolve_boundary_urls(resources, report, client=client, retries=2)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    assert "data" not in resources[0]["extension"][0]["valueAttachment"]
+

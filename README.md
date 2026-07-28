@@ -67,15 +67,18 @@ A registry can carry tens of thousands of url-referenced boundary
 attachments. `extract` fetches them on a pool of worker threads (default 8,
 `--concurrency`) sharing one HTTP client, instead of one at a time — with
 retry and exponential backoff (default 3 attempts, `--retries`) for
-connection errors, `5xx`, and `429`. A `429` honours a `Retry-After` header
-if the server sends one. A `404` (or any other non-retryable `4xx`) is
-*not* retried — it will still be missing on the third attempt, so retrying
-it only multiplies the wait — and is reported once as
-`boundary_fetch_failed`, same as before. Every sleep is capped, so a
-pathological server can't stall the whole run. One boundary's fetch failing
-never aborts the others; progress (`resolved 1200/50000 boundaries (14
-failed)`) prints to stderr for runs large enough to matter, so a
-multi-hour fetch isn't silent throughout.
+connection errors, `5xx`, and `429`. A `429` or `5xx` honours a
+`Retry-After` header if the server sends one, in the numeric-seconds form
+(`Retry-After: 7`) — the HTTP-date form (`Retry-After: Wed, 21 Oct 2026
+07:28:00 GMT`) is not parsed and falls back to exponential backoff instead.
+A `404` (or any other non-retryable `4xx`) is *not* retried — it will still
+be missing on the third attempt, so retrying it only multiplies the wait —
+and is reported once as `boundary_fetch_failed`, same as before. Every
+sleep is capped at 30s **and floored at 0s**, so neither a pathological
+huge `Retry-After` nor a negative one can stall or crash the run. One
+boundary's fetch failing never aborts the others; progress (`resolved
+1200/50000 boundaries (14 failed)`) prints to stderr for runs large enough
+to matter, so a multi-hour fetch isn't silent throughout.
 
 ### Fetched boundaries are cached on disk
 
