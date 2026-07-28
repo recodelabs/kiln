@@ -12,6 +12,7 @@ import base64
 import binascii
 from dataclasses import dataclass, field
 
+from kiln.report import Report
 from kiln.shape import as_list
 
 BOUNDARY_EXTENSION_URL = (
@@ -88,7 +89,7 @@ def _identifier_value(identifiers: list[dict], system: str) -> str | None:
     return None
 
 
-def _read_boundary(extension: dict, location_id: str, report) -> BoundaryRef | None:
+def _read_boundary(extension: dict, location_id: str, report: Report) -> BoundaryRef | None:
     value_attachment = extension.get("valueAttachment")
     if not isinstance(value_attachment, dict):
         report.add(
@@ -121,7 +122,7 @@ def _read_boundary(extension: dict, location_id: str, report) -> BoundaryRef | N
     return None
 
 
-def shred(resource: dict, report) -> RawLocation | None:
+def shred(resource: dict, report: Report) -> RawLocation | None:
     """Flatten one FHIR Location resource. Returns None if it has no id.
 
     `resource` is untrusted: it may have come straight off the wire (a
