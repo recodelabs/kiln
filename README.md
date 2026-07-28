@@ -100,6 +100,16 @@ correspondingly fast; a run that gets killed halfway through a large fetch
 picks up where it left off next time instead of re-fetching everything,
 as a side effect of the same mechanism.
 
+The key is the URL alone — it deliberately does not include the auth
+token. That's a caveat, not a bug, but an unusual one: if you point two
+different servers (or two tokens with different access grants) at the
+*same* `--cache-dir`, and both happen to expose the same URL but would
+return different bytes for it per-token, the first one fetched wins and the
+second server silently gets served the first server's cached bytes instead
+of its own. This needs a fairly odd deployment to hit (shared cache
+directory, colliding URLs, token-dependent responses), but if that
+describes your setup, use a separate `--cache-dir` per server/token.
+
 Only successful fetches are cached — a `404` today may be a working URL
 tomorrow, so caching a failure would turn a transient outage into a
 permanent one. `--no-cache` disables the cache entirely for one run
