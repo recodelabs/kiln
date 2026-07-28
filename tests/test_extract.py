@@ -1,9 +1,12 @@
 import base64
 import json
+import threading
+import time
 
 import httpx
 import pytest
 
+import kiln.extract as extract_module
 from kiln.extract import (
     MalformedNdjsonError,
     fetch_locations,
@@ -501,3 +504,190 @@ def test_resolve_skips_a_non_string_boundary_url_without_crashing():
     assert "data" not in resources[0]["extension"][0]["valueAttachment"]
     attachment = resources[1]["extension"][0]["valueAttachment"]
     assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def _many_resources_with_boundary_urls(n: int) -> list[dict]:
+    resources = []
+    for i in range(n):
+        resource = a_resource_with_boundary_url(f"https://files.test/{i}.geojson")
+        resource["id"] = f"loc-{i}"
+        resources.append(resource)
+    return resources
+
+
+def test_resolve_concurrently_inlines_many_boundaries():
+    resources = _many_resources_with_boundary_urls(50)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    resolve_boundary_urls(resources, report, client=client, concurrency=8)
+
+    assert report.counts() == {}
+    for resource in resources:
+        attachment = resource["extension"][0]["valueAttachment"]
+        assert base64.b64decode(attachment["data"]) == GEOJSON
+        assert "url" not in attachment
+
+
+def test_resolve_runs_fetches_concurrently():
+    """Prove the worker pool actually overlaps in-flight requests, not just
+    that it produces correct output -- a bug that silently serialized the
+    work (e.g. holding a lock across the whole fetch) would still pass every
+    correctness assertion.
+    """
+    resources = _many_resources_with_boundary_urls(20)
+    lock = threading.Lock()
+    state = {"concurrent": 0, "max_concurrent": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with lock:
+            state["concurrent"] += 1
+            state["max_concurrent"] = max(state["max_concurrent"], state["concurrent"])
+        time.sleep(0.05)
+        with lock:
+            state["concurrent"] -= 1
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    resolve_boundary_urls(resources, report, client=client, concurrency=8)
+
+    assert state["max_concurrent"] > 1
+    assert report.counts() == {}
+
+
+def test_resolve_report_ordering_is_deterministic():
+    """Running the same input twice must produce identical report.issues,
+    regardless of which worker thread happens to finish first each time.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        index = int(request.url.path.rsplit("/", 1)[-1].split(".")[0])
+        if index % 3 == 0:
+            return httpx.Response(404, text="gone")
+        return httpx.Response(200, content=GEOJSON)
+
+    def run_once():
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        report = Report()
+        resources = _many_resources_with_boundary_urls(20)
+        resolve_boundary_urls(resources, report, client=client, concurrency=6, retries=1)
+        return report.issues
+
+    first = run_once()
+    second = run_once()
+
+    assert first == second
+    assert len(first) == 7  # indices 0, 3, 6, ..., 18 -> 7 of the 20
+
+
+def test_resolve_retries_a_500_and_succeeds_on_a_later_attempt(monkeypatch):
+    monkeypatch.setattr(extract_module.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert len(calls) == 3
+    assert report.counts() == {}
+    attachment = resources[0]["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON
+
+
+def test_resolve_does_not_retry_a_404(monkeypatch):
+    monkeypatch.setattr(extract_module.time, "sleep", lambda seconds: None)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(404, text="gone")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resources = [a_resource_with_boundary_url("https://files.test/missing.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert len(calls) == 1  # a 404 will still be a 404 on attempt 3 -- don't bother
+    assert report.counts() == {"boundary_fetch_failed": 1}
+
+
+def test_resolve_honours_retry_after_on_429(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(extract_module.time, "sleep", sleeps.append)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"Retry-After": "2"}, text="slow down")
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert len(calls) == 2
+    assert sleeps == [2.0]
+    assert report.counts() == {}
+
+
+def test_resolve_reports_after_retries_exhausted_and_other_boundaries_still_resolve(
+    monkeypatch,
+):
+    monkeypatch.setattr(extract_module.time, "sleep", lambda seconds: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "bad" in request.url.path:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+    bad = a_resource_with_boundary_url("https://files.test/bad.geojson")
+    bad["id"] = "loc-bad"
+    good = a_resource_with_boundary_url("https://files.test/good.geojson")
+    good["id"] = "loc-good"
+    resources = [bad, good]
+
+    resolve_boundary_urls(resources, report, client=client, retries=3)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    assert report.issues[0].location_id == "loc-bad"
+    assert "data" not in bad["extension"][0]["valueAttachment"]
+    good_attachment = good["extension"][0]["valueAttachment"]
+    assert base64.b64decode(good_attachment["data"]) == GEOJSON
+
+
+def test_resolve_with_concurrency_one_still_works():
+    """--concurrency 1 must remain equivalent to the old sequential loop."""
+    resources = _many_resources_with_boundary_urls(10)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = Report()
+
+    resolve_boundary_urls(resources, report, client=client, concurrency=1)
+
+    assert report.counts() == {}
+    for resource in resources:
+        attachment = resource["extension"][0]["valueAttachment"]
+        assert base64.b64decode(attachment["data"]) == GEOJSON
