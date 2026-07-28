@@ -138,6 +138,82 @@ def test_rerunning_transform_into_the_same_out_replaces_stale_partitions(tmp_pat
     assert set(second["country"]) == {"ZZ"}
 
 
+def test_transform_on_a_pretty_printed_bundle_fails_loudly_and_preserves_the_old_dataset(
+    tmp_path, capsys
+):
+    """A previous-good dataset at --out must survive an input kiln cannot
+    even read at all -- combined with write_dataset owning out/locations/,
+    a silent zero-rows-resolved "success" here would otherwise wipe it.
+    """
+    out = tmp_path / "out"
+    main(["transform", "--in", str(FIXTURE), "--out", str(out)])
+    before_files = {
+        p.relative_to(out).as_posix(): p.stat().st_size for p in out.rglob("*.parquet")
+    }
+    before_report = (out / "_report.json").read_text()
+    assert before_files
+
+    pretty = tmp_path / "pretty_bundle.json"
+    payload = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Location", "id": "x"}}],
+    }
+    pretty.write_text(json.dumps(payload, indent=2))
+
+    code = main(["transform", "--in", str(pretty), "--out", str(out)])
+
+    assert code == 2
+    assert "pretty-printed" in capsys.readouterr().err
+    after_files = {
+        p.relative_to(out).as_posix(): p.stat().st_size for p in out.rglob("*.parquet")
+    }
+    assert after_files == before_files
+    assert (out / "_report.json").read_text() == before_report
+
+
+def test_a_failed_rerun_leaves_the_old_dataset_intact_with_no_stale_report(tmp_path, monkeypatch):
+    """The core regression: a mid-write ogr2ogr failure on a rerun over a
+    good dataset must not touch out/locations/ at all, and must not leave
+    behind a _report.json that still claims the old run's success -- that
+    combination used to be indistinguishable from a real, complete result.
+    """
+    out = tmp_path / "out"
+    main(["transform", "--in", str(FIXTURE), "--out", str(out)])
+    before_files = {
+        p.relative_to(out).as_posix(): p.stat().st_size for p in out.rglob("*.parquet")
+    }
+    before_report = (out / "_report.json").read_text()
+    assert before_files
+
+    import subprocess
+
+    real_run = subprocess.run
+    call_count = {"n": 0}
+
+    def flaky_run(cmd, *args, **kwargs):
+        if cmd[0] == "ogr2ogr":
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="synthetic failure")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", flaky_run)
+
+    code = main(["transform", "--in", str(FIXTURE), "--out", str(out)])
+
+    assert code == 2
+    after_files = {
+        p.relative_to(out).as_posix(): p.stat().st_size for p in out.rglob("*.parquet")
+    }
+    assert after_files == before_files  # old dataset completely intact
+    assert not (out / ".locations.tmp").exists()
+    assert not (out / ".locations.old.tmp").exists()
+    # No stale report claiming the old run's success, and nothing else
+    # falsely claiming this failed run succeeded either.
+    assert not (out / "_report.json").exists()
+    assert before_report  # sanity: there was something to go stale
+
+
 def _fhir_bundle_with_one_location() -> dict:
     return {
         "resourceType": "Bundle",

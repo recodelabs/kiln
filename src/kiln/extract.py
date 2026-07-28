@@ -21,6 +21,25 @@ from kiln.shape import as_list
 PAGE_SIZE = 1000
 TIMEOUT = httpx.Timeout(60.0)
 
+# The classic first line of a pretty-printed JSON object or array
+# (`json.dumps(..., indent=2)`): nothing else on the line. Used by
+# read_ndjson to detect a multi-line document up front, cheaply, without
+# reading the rest of the file.
+_PRETTY_PRINTED_JSON_MARKERS = ("{", "[")
+
+
+class MalformedNdjsonError(ValueError):
+    """Raised when the input file is not NDJSON at all (e.g. pretty-printed JSON).
+
+    This is a format/code problem, not a per-row data-quality issue: unlike
+    a single malformed line (reported and skipped), a pretty-printed
+    multi-line document breaks *every* line, so read_ndjson would otherwise
+    yield zero resources and a pile of `malformed_field` issues -- an empty,
+    silently "successful" run that (combined with `write_dataset` owning
+    `out/locations/`) would replace a user's previous good export with
+    nothing, for an input kiln simply cannot read.
+    """
+
 
 def _headers(token: str | None) -> dict[str, str]:
     headers = {"Accept": "application/fhir+json"}
@@ -244,6 +263,18 @@ def read_ndjson(path: Path, report: Report | None = None) -> Iterator[dict]:
     1-based line number) and skipped rather than aborting the whole
     transform on one bad line. `report` is optional so existing callers
     that don't need the detail keep working.
+
+    A pretty-printed, multi-line JSON document (e.g. a formatted FHIR
+    Bundle from `json.dumps(..., indent=2)`) is a different failure mode
+    entirely: every line fails to parse on its own, so nothing above would
+    catch it as a single bad line -- the whole file would be reported as a
+    pile of `malformed_field` issues and yield zero resources, exiting 0 as
+    if the run had simply resolved no data. That is loud enough to notice
+    in isolation, but not in the normal nightly-refresh flow, where
+    `write_dataset` owns `out/locations/` and treats "zero rows resolved"
+    as a legitimate, intentional result to replace the previous dataset
+    with. So this case is detected explicitly and raises `MalformedNdjsonError`
+    instead of being folded into the per-line reporting path.
     """
     path = Path(path)
 
@@ -253,6 +284,16 @@ def read_ndjson(path: Path, report: Report | None = None) -> Iterator[dict]:
             line = raw_line.strip()
             if not line:
                 continue
+
+            if not first_resource_seen and line in _PRETTY_PRINTED_JSON_MARKERS:
+                raise MalformedNdjsonError(
+                    f"{path}: line {line_number} is just {line!r} -- this looks "
+                    "like a pretty-printed, multi-line JSON document, not NDJSON "
+                    "or a single-line FHIR Bundle. read_ndjson reads one JSON "
+                    "value per line and cannot parse a document split across "
+                    "lines this way. Re-export as newline-delimited JSON, or "
+                    "compact it first, e.g.: `jq -c . input.json > input.ndjson`."
+                )
 
             try:
                 payload = json.loads(line)

@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from kiln.extract import (
+    MalformedNdjsonError,
     fetch_locations,
     read_ndjson,
     resolve_boundary_urls,
@@ -186,6 +187,29 @@ def test_read_ndjson_without_a_report_still_skips_malformed_lines(tmp_path):
     path.write_text('{"id":"a"}\nnot json\n')
 
     assert [r["id"] for r in read_ndjson(path)] == ["a"]
+
+
+def test_read_ndjson_rejects_a_pretty_printed_multi_line_bundle_loudly(tmp_path):
+    """A pretty-printed Bundle (json.dumps(..., indent=2)) breaks every
+    single line, not just one: read_ndjson streams line by line, so this
+    used to yield zero resources and a pile of malformed_field issues,
+    exiting cleanly as if the run had legitimately resolved no data. That
+    is indistinguishable from a real empty result once combined with
+    write_dataset owning out/locations/ -- this must fail loudly instead.
+    """
+    path = tmp_path / "pretty_bundle.json"
+    path.write_text(json.dumps(bundle([{"id": "a"}, {"id": "b"}]), indent=2))
+
+    with pytest.raises(MalformedNdjsonError, match="pretty-printed"):
+        list(read_ndjson(path))
+
+
+def test_read_ndjson_rejects_a_pretty_printed_json_array_loudly(tmp_path):
+    path = tmp_path / "pretty_array.json"
+    path.write_text(json.dumps([{"id": "a"}], indent=2))
+
+    with pytest.raises(MalformedNdjsonError, match="pretty-printed"):
+        list(read_ndjson(path))
 
 
 def test_read_ndjson_skips_a_non_list_bundle_entry_field(tmp_path):

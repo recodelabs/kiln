@@ -10,6 +10,7 @@ from pathlib import Path
 
 from kiln import __version__
 from kiln.extract import (
+    MalformedNdjsonError,
     fetch_locations,
     read_ndjson,
     resolve_boundary_urls,
@@ -71,7 +72,11 @@ def cmd_transform(args: argparse.Namespace) -> int:
         return USAGE_ERROR
 
     report = Report()
-    resources = list(read_ndjson(source, report))
+    try:
+        resources = list(read_ndjson(source, report))
+    except MalformedNdjsonError as exc:
+        print(str(exc), file=sys.stderr)
+        return USAGE_ERROR
     _note_unresolved_boundary_urls(resources, report)
 
     locations = [loc for loc in (shred(r, report) for r in resources) if loc is not None]
@@ -92,6 +97,18 @@ def cmd_transform(args: argparse.Namespace) -> int:
         return USAGE_ERROR
 
     out_dir = Path(args.out)
+    report_path = out_dir / "_report.json"
+    # write_dataset makes out/locations/ itself atomic -- a failed run
+    # leaves it exactly as it was. But cmd_transform used to write
+    # _report.json only *after* write_dataset returned, so a failure left
+    # whatever report a previous successful run wrote sitting there,
+    # unchanged, still claiming that old run's success -- indistinguishable
+    # from a report that's actually current. Delete it before attempting
+    # the write: on failure the old (untouched) dataset is left with no
+    # report describing it at all, which is a much louder, more honest
+    # signal than a stale one; on success it's rewritten below to describe
+    # exactly what's now on disk.
+    report_path.unlink(missing_ok=True)
     try:
         written = write_dataset(
             frame,
@@ -106,7 +123,7 @@ def cmd_transform(args: argparse.Namespace) -> int:
         return USAGE_ERROR
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "_report.json").write_text(json.dumps(report.to_dict(), indent=2))
+    report_path.write_text(json.dumps(report.to_dict(), indent=2))
 
     print(f"Wrote {len(frame)} rows across {len(written)} partitions to {out_dir}")
     print(report.summary())
