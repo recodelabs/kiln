@@ -183,6 +183,30 @@ def test_resolve_malformed_binary_base64_is_reported_and_does_not_abort():
     assert "data" not in resources[0]["extension"][0]["valueAttachment"]
 
 
+@pytest.mark.parametrize("bad_data", [42, {"key": "value"}, [1, 2, 3], True])
+def test_resolve_binary_with_non_string_data_is_reported_and_does_not_abort(
+    bad_data,
+):
+    """Test that non-string Binary.data is reported without aborting."""
+    report = Report()
+    payload = {
+        "resourceType": "Binary",
+        "contentType": "application/geo+json",
+        "data": bad_data,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resources = [a_resource_with_boundary_url("https://fhir.test/Binary/bad")]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    assert "data" not in resources[0]["extension"][0]["valueAttachment"]
+
+
 def test_resolve_connection_error_is_reported_and_does_not_abort():
     """Test that connection errors are reported without aborting the run."""
     report = Report()

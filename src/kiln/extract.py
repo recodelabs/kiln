@@ -163,7 +163,7 @@ def _fetch_boundary(
             return None
         try:
             return base64.b64decode(data, validate=True)
-        except (binascii.Error, ValueError) as exc:
+        except (binascii.Error, ValueError, TypeError) as exc:
             report.add(
                 "boundary_fetch_failed",
                 location_id,

@@ -1,5 +1,7 @@
 import base64
 
+import pytest
+
 from kiln.profile import (
     BOUNDARY_EXTENSION_URL,
     DELIVERY_STRATEGY_EXTENSION_URL,
@@ -258,6 +260,30 @@ def test_shred_guards_against_non_dict_boundary_valueattachment():
     assert raw.id == "loc-1"
     assert raw.boundary is None
     assert report.counts() == {"malformed_field": 1}
+
+
+@pytest.mark.parametrize("bad_data", [42, {"key": "value"}, [1, 2, 3], True])
+def test_shred_rejects_boundary_with_non_string_data(bad_data):
+    """Non-string boundary.data should be reported without aborting."""
+    report = Report()
+    resource = a_location(
+        extension=[
+            {
+                "url": BOUNDARY_EXTENSION_URL,
+                "valueAttachment": {
+                    "contentType": "application/geo+json",
+                    "data": bad_data,
+                },
+            }
+        ]
+    )
+
+    raw = shred(resource, report)
+
+    assert raw is not None
+    assert raw.id == "loc-1"
+    assert raw.boundary is None
+    assert report.counts() == {"boundary_bad_base64": 1}
 
 
 def test_shred_guards_against_non_dict_overlays_valuereference():

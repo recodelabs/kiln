@@ -106,7 +106,7 @@ def _read_boundary(extension: dict, location_id: str, report) -> BoundaryRef | N
     if attachment.get("data"):
         try:
             return BoundaryRef(data=base64.b64decode(attachment["data"], validate=True))
-        except (binascii.Error, ValueError) as exc:
+        except (binascii.Error, ValueError, TypeError) as exc:
             report.add("boundary_bad_base64", location_id, str(exc))
             return None
 
