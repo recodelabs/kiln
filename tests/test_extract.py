@@ -160,3 +160,76 @@ def test_read_ndjson_accepts_a_compact_bundle_json_file(tmp_path):
     path.write_text(compact_bundle)
 
     assert [r["id"] for r in read_ndjson(path)] == ["a", "b"]
+
+
+def test_resolve_malformed_binary_base64_is_reported_and_does_not_abort():
+    """Test that malformed base64 in Binary data is reported without aborting."""
+    report = Report()
+    payload = {
+        "resourceType": "Binary",
+        "contentType": "application/geo+json",
+        "data": "not-valid-base64!!!",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resources = [a_resource_with_boundary_url("https://fhir.test/Binary/bad")]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    assert "data" not in resources[0]["extension"][0]["valueAttachment"]
+
+
+def test_resolve_connection_error_is_reported_and_does_not_abort():
+    """Test that connection errors are reported without aborting the run."""
+    report = Report()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Network unreachable")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resources = [a_resource_with_boundary_url("https://files.test/a.geojson")]
+
+    resolve_boundary_urls(resources, report, client=client)
+
+    assert report.counts() == {"boundary_fetch_failed": 1}
+    assert "data" not in resources[0]["extension"][0]["valueAttachment"]
+
+
+def test_fetch_raises_on_cyclic_pagination():
+    """Test that cyclic next links are detected and raise with a clear message."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Always return the same next link, creating a cycle
+        return httpx.Response(
+            200, json=bundle(
+                [{"id": "a"}],
+                next_url="https://fhir.test/Location?page=1"
+            )
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(RuntimeError, match="Cyclic pagination detected"):
+        list(fetch_locations("https://fhir.test", None, client=client))
+
+
+def test_fetch_raises_on_excessive_pagination():
+    """Test that excessive pagination (too many pages) is detected and raises."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Always return a different next link
+        page = request.url.params.get("page", "0")
+        next_page = str(int(page) + 1)
+        return httpx.Response(
+            200, json=bundle(
+                [{"id": f"loc-{page}"}],
+                next_url=f"https://fhir.test/Location?page={next_page}"
+            )
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(RuntimeError, match="Exceeded maximum pagination limit"):
+        list(fetch_locations("https://fhir.test", None, client=client))

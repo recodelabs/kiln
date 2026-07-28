@@ -7,6 +7,7 @@ which is what makes the geo half testable from fixtures.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -33,7 +34,12 @@ def fetch_locations(
     since: str | None = None,
     client: httpx.Client | None = None,
 ) -> Iterator[dict]:
-    """Yield every Location resource, following Bundle.link[next]."""
+    """Yield every Location resource, following Bundle.link[next].
+
+    Closes the client when the generator is exhausted or garbage-collected.
+    To avoid resource leaks, either exhaust the generator or pass your own
+    client and manage its lifecycle.
+    """
     owns_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT)
     headers = _headers(token)
@@ -42,9 +48,25 @@ def fetch_locations(
     if since:
         params["_lastUpdated"] = f"gt{since}"
     url = f"{server.rstrip('/')}/Location"
+    visited_urls = set()
+    max_pages = 10000
 
     try:
+        page_count = 0
         while url:
+            if url in visited_urls:
+                raise RuntimeError(
+                    f"Cyclic pagination detected: server returned "
+                    f"duplicate next link: {url}"
+                )
+            if page_count >= max_pages:
+                raise RuntimeError(
+                    f"Exceeded maximum pagination limit ({max_pages} pages). "
+                    f"Server may have misconfigured pagination."
+                )
+            visited_urls.add(url)
+            page_count += 1
+
             response = client.get(url, params=params, headers=headers)
             if response.status_code != 200:
                 raise RuntimeError(
@@ -139,7 +161,15 @@ def _fetch_boundary(
         if not data:
             report.add("boundary_fetch_failed", location_id, f"{url}: Binary has no data")
             return None
-        return base64.b64decode(data)
+        try:
+            return base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            report.add(
+                "boundary_fetch_failed",
+                location_id,
+                f"{url}: Binary data is not valid base64: {exc}",
+            )
+            return None
 
     return response.content
 
