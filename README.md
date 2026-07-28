@@ -28,20 +28,25 @@ One country per run.
 
 ```bash
 # Fetch Locations, resolving any url-referenced boundary attachments
-kiln extract \
+uv run kiln extract \
   --server https://healthcare.googleapis.com/v1/projects/.../fhir \
   --token "$(gcloud auth print-access-token)" \
   --out locations.ndjson
 
 # Convert to partitioned GeoParquet (offline — no network)
-kiln transform --in locations.ndjson --out out/
+uv run kiln transform --in locations.ndjson --out out/
 
 # Or both at once
-kiln run --server ... --token ... --out out/
+uv run kiln run --server ... --token ... --out out/
 
 # Check what was written
-kiln inspect --out out/
+uv run kiln inspect --out out/
 ```
+
+Every command below is written as `uv run kiln ...` for the same reason: `uv sync`
+alone does not put `kiln` on `PATH`. If you'd rather invoke it bare, activate the
+venv first (`source .venv/bin/activate`) or `uv pip install -e .` into an
+already-active environment.
 
 `--token` falls back to `$KILN_TOKEN`.
 
@@ -126,7 +131,7 @@ everything else — see [Schema](#schema) for why it's a separate column from
 | Option | Default | Description |
 | --- | --- | --- |
 | `--country` | derived from the root admin-unit's pcode | Override the country partition value |
-| `--geo-types` | `both` | `both` = native Parquet geometry type + GeoParquet 1.1 metadata; `only` = native only, no legacy WKB fallback annotation; `legacy` = plain WKB, no native geometry type |
+| `--geo-types` | `both` | `both` = native Parquet geometry type, plus GeoParquet 1.1 sidecar metadata (`geo` key: version, geometry types, covering bbox). `only` = native geometry type with **no** GeoParquet sidecar metadata at all — `kiln inspect` and any other metadata-based reader will report `geo=None`, `covering=False`, empty `types=` for a perfectly valid file, so don't reach for `only` unless every downstream reader speaks native Arrow geometry types directly. `legacy` = plain WKB (no native geometry type), but *with* the GeoParquet 1.1 sidecar metadata — the most broadly compatible option |
 | `--partition-by` | `country,geom_type,tier` | Hive partition keys |
 | `--row-group-size` | `20000` | Rows per Parquet row group |
 
