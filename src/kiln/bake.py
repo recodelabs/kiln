@@ -139,7 +139,7 @@ def normalize_geometry(
 
     try:
         shape = shapely.geometry.shape(geometry)
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, KeyError) as exc:
         report.add("geometry_invalid", location_id, f"unparseable geometry: {exc}")
         return None
 

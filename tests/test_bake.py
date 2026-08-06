@@ -125,3 +125,10 @@ def test_normalize_geometry_reports_non_polygon_and_missing():
     assert normalize_geometry(point, "w1", report) is None
     assert normalize_geometry(None, "w2", report) is None
     assert report.counts() == {"geometry_invalid": 2}
+
+
+def test_normalize_geometry_reports_incomplete_geometry():
+    report = Report()
+    incomplete = {"type": "Polygon"}  # missing coordinates key
+    assert normalize_geometry(incomplete, "w1", report) is None
+    assert report.counts() == {"geometry_invalid": 1}
