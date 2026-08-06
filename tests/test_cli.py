@@ -571,3 +571,71 @@ def test_load_exits_2_on_load_error(tmp_path, monkeypatch, capsys):
 
     assert code == 2
     assert "update-as-create" in capsys.readouterr().err
+
+
+FACILITY_CSV = """\
+state,lga,ward,facility_name,latitude,longitude,globalid,nhfr_code
+Bauchi,Alkaleri,Alkaleri East,Alkaleri East PHC,10.5,9.9,aaaa-1111,08/01
+Kano,Dala,Kofar,Kofar PHC,12.0,8.5,bbbb-2222,20/01
+"""
+
+
+def test_bake_points_links_facilities_and_filters(tmp_path, capsys):
+    admin = tmp_path / "admin.ndjson"
+    source = tmp_path / "wards.geojson"
+    source.write_text(json.dumps(BAKE_COLLECTION))
+    assert main([
+        "bake", "--in", str(source),
+        "--country", "Nigeria=NGA",
+        "--level", "state=state:statecode",
+        "--level", "lga=lga",
+        "--level", "ward=ward",
+        "--out", str(admin),
+    ]) == 0
+
+    facilities = tmp_path / "facilities.csv"
+    facilities.write_text(FACILITY_CSV)
+    out = tmp_path / "facilities.ndjson"
+    code = main([
+        "bake-points", "--in", str(facilities),
+        "--admin", str(admin),
+        "--type", "facility",
+        "--name-col", "facility_name",
+        "--lat-col", "latitude", "--lon-col", "longitude",
+        "--id-col", "globalid",
+        "--parent", "state=state", "--parent", "lga=lga", "--parent", "ward=ward",
+        "--identifier", "https://example.org/nhfr=nhfr_code",
+        "--where", "state=Bauchi",
+        "--out", str(out),
+    ])
+
+    assert code == 0
+    (resource,) = [json.loads(line) for line in out.read_text().splitlines()]
+    assert resource["id"] == "aaaa-1111"
+    assert resource["type"][0]["coding"][0]["code"] == "facility"
+    assert resource["physicalType"]["coding"][0]["code"] == "si"
+    assert resource["partOf"] == {"reference": "Location/nga-ba-alkaleri-alkaleri-east"}
+    assert resource["position"] == {"longitude": 9.9, "latitude": 10.5}
+    assert "Wrote 1 Locations" in capsys.readouterr().out
+
+
+def test_bake_points_exits_2_on_bad_mapping(tmp_path, capsys):
+    admin = tmp_path / "admin.ndjson"
+    admin.write_text('{"resourceType":"Location","id":"nga","name":"Nigeria"}\n')
+    facilities = tmp_path / "facilities.csv"
+    facilities.write_text(FACILITY_CSV)
+
+    code = main([
+        "bake-points", "--in", str(facilities),
+        "--admin", str(admin),
+        "--type", "facility",
+        "--name-col", "facility_name",
+        "--lat-col", "latitude", "--lon-col", "longitude",
+        "--id-col", "globalid",
+        "--parent", "badflag",
+        "--out", str(tmp_path / "out.ndjson"),
+    ])
+
+    assert code == 2
+    assert "badflag" in capsys.readouterr().err
+    assert not (tmp_path / "out.ndjson").exists()
