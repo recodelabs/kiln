@@ -7,9 +7,15 @@ Spec: docs/superpowers/specs/2026-08-05-admin-import-design.md.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
+
+import shapely
+import shapely.geometry
+
+from kiln.report import Report
 
 
 class BakeError(ValueError):
@@ -76,3 +82,83 @@ def parse_alias_args(args: list[str]) -> dict[str, str]:
             raise BakeError(f"--alias must be LEVEL=PROPERTY, got {arg!r}")
         aliases[level] = prop
     return aliases
+
+
+# GeoJSON's only legal CRS is WGS84 lon/lat (RFC 7946 killed the `crs`
+# member); these are the spellings of it seen in the wild. Anything else
+# means the coordinates are in a projected system and every geometry would
+# be garbage -- fatal, not per-feature.
+_ACCEPTED_CRS_NAMES = frozenset(
+    {
+        "EPSG:4326",
+        "urn:ogc:def:crs:EPSG::4326",
+        "urn:ogc:def:crs:OGC:1.3:CRS84",
+        "CRS84",
+        "OGC:CRS84",
+    }
+)
+
+
+def check_crs(collection: dict) -> None:
+    """Raise BakeError unless the collection is (explicitly or by default) WGS84."""
+    crs = collection.get("crs")
+    if crs is None:
+        return
+    name = ""
+    if isinstance(crs, dict):
+        properties = crs.get("properties")
+        if isinstance(properties, dict):
+            name = properties.get("name", "")
+    if name not in _ACCEPTED_CRS_NAMES:
+        raise BakeError(
+            f"input CRS {name!r} is not WGS84 (EPSG:4326); reproject the file first, "
+            "e.g.: ogr2ogr -t_srs EPSG:4326 out.geojson in.geojson"
+        )
+
+
+def normalize_geometry(
+    geometry: dict | None, location_id: str, report: Report
+) -> bytes | None:
+    """Validate and rewind one feature geometry; None (reported) if unusable.
+
+    Only Polygon/MultiPolygon are boundaries. Output is compact RFC 7946
+    GeoJSON bytes with exterior rings counterclockwise and holes clockwise
+    (shapely's `orient(sign=1.0)` convention, applied per polygon).
+    """
+    if not isinstance(geometry, dict) or geometry.get("type") not in (
+        "Polygon",
+        "MultiPolygon",
+    ):
+        kind = geometry.get("type") if isinstance(geometry, dict) else None
+        report.add(
+            "geometry_invalid",
+            location_id,
+            f"geometry is {kind!r}, expected Polygon or MultiPolygon",
+        )
+        return None
+
+    try:
+        shape = shapely.geometry.shape(geometry)
+    except (ValueError, TypeError) as exc:
+        report.add("geometry_invalid", location_id, f"unparseable geometry: {exc}")
+        return None
+
+    if shape.is_empty or not shape.is_valid:
+        reason = "empty geometry" if shape.is_empty else shapely.is_valid_reason(shape)
+        report.add("geometry_invalid", location_id, reason)
+        return None
+
+    oriented = _orient_rfc7946(shape)
+    return json.dumps(
+        shapely.geometry.mapping(oriented), separators=(",", ":")
+    ).encode()
+
+
+def _orient_rfc7946(shape):
+    """Exterior rings counterclockwise, holes clockwise, per RFC 7946."""
+    from shapely.geometry import MultiPolygon
+    from shapely.geometry.polygon import orient
+
+    if isinstance(shape, MultiPolygon):
+        return MultiPolygon([orient(polygon, sign=1.0) for polygon in shape.geoms])
+    return orient(shape, sign=1.0)

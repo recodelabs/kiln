@@ -1,13 +1,18 @@
+import json
+
 import pytest
 
 from kiln.bake import (
     BakeError,
     LevelSpec,
+    check_crs,
+    normalize_geometry,
     parse_alias_args,
     parse_country_arg,
     parse_level_arg,
     slugify,
 )
+from kiln.report import Report
 
 
 def test_slugify_lowercases_folds_and_hyphenates():
@@ -51,3 +56,72 @@ def test_parse_alias_args():
     }
     with pytest.raises(BakeError):
         parse_alias_args(["lga"])
+
+
+# Exterior ring wound clockwise on purpose: RFC 7946 requires counterclockwise,
+# so normalize_geometry must rewind it.
+CW_SQUARE = {
+    "type": "Polygon",
+    "coordinates": [[[3.0, 6.0], [3.0, 7.0], [4.0, 7.0], [4.0, 6.0], [3.0, 6.0]]],
+}
+
+
+def test_check_crs_accepts_missing_and_4326_spellings():
+    check_crs({"type": "FeatureCollection", "features": []})  # absent = default
+    for name in (
+        "EPSG:4326",
+        "urn:ogc:def:crs:EPSG::4326",
+        "urn:ogc:def:crs:OGC:1.3:CRS84",
+        "CRS84",
+    ):
+        check_crs(
+            {
+                "type": "FeatureCollection",
+                "crs": {"type": "name", "properties": {"name": name}},
+                "features": [],
+            }
+        )
+
+
+def test_check_crs_rejects_anything_else():
+    with pytest.raises(BakeError):
+        check_crs(
+            {
+                "type": "FeatureCollection",
+                "crs": {"type": "name", "properties": {"name": "EPSG:3857"}},
+                "features": [],
+            }
+        )
+
+
+def test_normalize_geometry_rewinds_rings_to_rfc7946():
+    report = Report()
+    payload = normalize_geometry(CW_SQUARE, "w1", report)
+
+    assert payload is not None
+    ring = json.loads(payload)["coordinates"][0]
+    # Shoelace: positive area = counterclockwise exterior.
+    area2 = sum(
+        (x1 * y2 - x2 * y1)
+        for (x1, y1), (x2, y2) in zip(ring, ring[1:], strict=False)
+    )
+    assert area2 > 0
+    assert report.counts() == {}
+
+
+def test_normalize_geometry_reports_invalid_and_returns_none():
+    report = Report()
+    bowtie = {
+        "type": "Polygon",
+        "coordinates": [[[0, 0], [1, 1], [1, 0], [0, 1], [0, 0]]],
+    }
+    assert normalize_geometry(bowtie, "w1", report) is None
+    assert report.counts() == {"geometry_invalid": 1}
+
+
+def test_normalize_geometry_reports_non_polygon_and_missing():
+    report = Report()
+    point = {"type": "Point", "coordinates": [3.0, 6.0]}
+    assert normalize_geometry(point, "w1", report) is None
+    assert normalize_geometry(None, "w2", report) is None
+    assert report.counts() == {"geometry_invalid": 2}
