@@ -157,6 +157,7 @@ def bake_points(
     paired_org: bool = False,
     org_identifiers: list[tuple[str, str]] | None = None,
     org_type_codings: list[tuple[str, str, str | None]] | None = None,
+    type_codings: list[tuple[str, str, str | None]] | None = None,
 ) -> list[dict]:
     """Turn point rows into site Location resources linked into the hierarchy.
 
@@ -172,6 +173,12 @@ def bake_points(
     slugified into the coding code with the raw value as display) followed
     by the Location, which references it via managingOrganization and
     keeps only the place identifiers from `identifiers`.
+
+    `type_codings` (same shape as `org_type_codings`) appends extra
+    classification CodeableConcepts to Location.type after the generic
+    functional code -- the mCSD-sanctioned duplication that lets
+    Location-only consumers (GeoParquet exports, map layers) see the
+    facility level and ownership without joining Organizations.
     """
     index = build_admin_index(admin_resources)
     resources: list[dict] = []
@@ -222,6 +229,7 @@ def bake_points(
                 identifiers=_row_identifiers(row, identifiers),
                 position=_read_position(row, lat_col, lon_col, row_label, report),
                 managing_org_id=org_id,
+                extra_type_concepts=_org_type_concepts(row, type_codings or []),
             )
         )
 

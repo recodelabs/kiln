@@ -73,6 +73,8 @@ class RawLocation:
     overlays_admin_unit_ids: list[str] = field(default_factory=list)
     settlement_type: str | None = None
     delivery_strategy: str | None = None
+    facility_level: str | None = None
+    ownership: str | None = None
     position: tuple[float, float] | None = None
     boundary: BoundaryRef | None = None
     last_updated: str | None = None
@@ -87,6 +89,23 @@ def _first_coding_code(node: dict | list | None) -> str | None:
     codings = as_list(node.get("coding"))
     if codings and isinstance(codings[0], dict):
         return codings[0].get("code")
+    return None
+
+
+def _coding_code_by_system(node: dict | list | None, system: str) -> str | None:
+    """Find the first coding under `system` across a list of CodeableConcepts.
+
+    The read side of the duplicated-classification convention: facility
+    level and ownership are authoritative on Organization.type but may be
+    copied onto Location.type as extra codings (mCSD allows it) so
+    Location-only consumers -- like this exporter -- can see them.
+    """
+    for concept in as_list(node):
+        if not isinstance(concept, dict):
+            continue
+        for coding in as_list(concept.get("coding")):
+            if isinstance(coding, dict) and coding.get("system") == system:
+                return coding.get("code")
     return None
 
 
@@ -218,6 +237,8 @@ def shred(resource: dict, report: Report) -> RawLocation | None:
         status=resource.get("status"),
         loc_type=_first_coding_code(resource.get("type")),
         physical_type=_first_coding_code(resource.get("physicalType")),
+        facility_level=_coding_code_by_system(resource.get("type"), FACILITY_TYPE_SYSTEM),
+        ownership=_coding_code_by_system(resource.get("type"), OWNERSHIP_SYSTEM),
         pcode=_identifier_value(identifiers, PCODE_SYSTEM),
         gers_id=_identifier_value(identifiers, GERS_SYSTEM),
         identifiers=identifiers_list,
@@ -317,6 +338,8 @@ def build_location(
 
 
 ORG_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/organization-type"
+FACILITY_TYPE_SYSTEM = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs"
+OWNERSHIP_SYSTEM = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs"
 ICR_FACILITY_ORG_PROFILE_URL = (
     "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
 )
@@ -379,6 +402,7 @@ def build_point_location(
     identifiers: list[tuple[str, str]],
     position: tuple[float, float] | None = None,
     managing_org_id: str | None = None,
+    extra_type_concepts: list[tuple[str, str, str, str | None]] | None = None,
 ) -> dict:
     """Build one site-shaped Location (facility, school, ...) per ICRLocation.
 
@@ -396,7 +420,7 @@ def build_point_location(
         "meta": {"profile": [ICR_LOCATION_PROFILE_URL]},
         "name": name,
         "status": "active",
-        "type": [{"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]}],
+        "type": _point_types(type_code, extra_type_concepts or []),
         "physicalType": {
             "coding": [
                 {"system": PHYSICAL_TYPE_SYSTEM, "code": "si", "display": "Site"}
@@ -417,6 +441,26 @@ def build_point_location(
             "reference": f"Organization/{managing_org_id}"
         }
     return resource
+
+
+def _point_types(
+    type_code: str, extra_type_concepts: list[tuple[str, str, str, str | None]]
+) -> list[dict]:
+    """The ICR functional code first, then any duplicated classification axes.
+
+    Organization.type stays authoritative for facility classification; the
+    extras here are the mCSD-sanctioned copy for Location-only consumers
+    (documented in the IG's facility-pairing section).
+    """
+    types: list[dict] = [
+        {"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]}
+    ]
+    for system, code, display, text in extra_type_concepts:
+        concept: dict = {"coding": [{"system": system, "code": code, "display": display}]}
+        if text:
+            concept["text"] = text
+        types.append(concept)
+    return types
 
 
 def attach_boundary(resource: dict, boundary_geojson: bytes) -> None:

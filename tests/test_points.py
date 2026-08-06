@@ -239,3 +239,39 @@ def test_paired_org_skips_empty_type_values():
 def test_unpaired_rows_have_no_managing_organization():
     (resource,) = run_bake_points([facility_row()])
     assert "managingOrganization" not in resource
+
+
+def test_type_codings_duplicate_classification_onto_the_location():
+    resources = bake_points(
+        [paired_row()],
+        admin_registry(),
+        type_code="facility",
+        name_col="facility_name",
+        lat_col="latitude",
+        lon_col="longitude",
+        id_col="globalid",
+        parents=PARENTS,
+        identifiers=[(GRID3, "globalid")],
+        where=[],
+        report=Report(),
+        paired_org=True,
+        org_identifiers=[(NHFR, "nhfr_code")],
+        org_type_codings=[
+            (FACILITY_TYPE_CS, "level", "level_detail"),
+            (OWNERSHIP_CS, "ownership", None),
+        ],
+        type_codings=[
+            (FACILITY_TYPE_CS, "level", "level_detail"),
+            (OWNERSHIP_CS, "ownership", None),
+        ],
+    )
+    location = next(r for r in resources if r["resourceType"] == "Location")
+
+    concepts = location["type"]
+    # Generic functional code first, then the duplicated classification axes.
+    assert concepts[0]["coding"][0]["code"] == "facility"
+    assert concepts[1]["coding"][0] == {
+        "system": FACILITY_TYPE_CS, "code": "primary", "display": "Primary",
+    }
+    assert concepts[1]["text"] == "Primary Health Center"
+    assert concepts[2]["coding"][0]["code"] == "public"

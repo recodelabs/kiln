@@ -237,6 +237,12 @@ coding is always added first). `kiln load` handles the mixed NDJSON:
 per-type PUT urls and an update-as-create preflight covering every loaded
 resource type.
 
+`--type-coding` (same syntax) additionally copies classification axes onto
+`Location.type` after the functional code — the mCSD-sanctioned
+duplication for Location-only consumers. Organization.type stays
+authoritative; the copy is what makes `facility_level` and `ownership`
+come out as columns in the GeoParquet export.
+
 By default only the feature level carries geometry — the minted ancestors
 (state, LGA) are boundary-less until an authoritative file for their level
 is loaded. Pass `--dissolve-parents` to give every ancestor a *derived*
