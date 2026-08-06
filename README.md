@@ -200,6 +200,14 @@ reported and skipped; mapping problems (a `--level` property that matches
 nothing, two units slugging to the same id, a non-WGS84 CRS) abort before
 anything is written.
 
+By default only the feature level carries geometry — the minted ancestors
+(state, LGA) are boundary-less until an authoritative file for their level
+is loaded. Pass `--dissolve-parents` to give every ancestor a *derived*
+boundary instead: the union of its children's polygons. Derived boundaries
+are exactly consistent with the child tiling (rollups and containment
+checks line up), but they are not authoritative cartography — loading an
+official boundary file later upserts over them, since ids are stable.
+
 ## Verified example
 
 Running `transform` against the test fixture (`tests/fixtures/locations.ndjson`,

@@ -212,6 +212,7 @@ def cmd_bake(args: argparse.Namespace) -> int:
             parse_alias_args(args.alias),
             args.code_system,
             report,
+            dissolve_parents=args.dissolve_parents,
         )
     except BakeError as exc:
         # Fatal mapping/input problem: nothing written (same contract as
@@ -371,6 +372,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="code_system",
         default=NATIONAL_ADMIN_CODE_SYSTEM,
         help=f"Identifier system URI for admin codes (default: {NATIONAL_ADMIN_CODE_SYSTEM})",
+    )
+    bake_cmd.add_argument(
+        "--dissolve-parents",
+        dest="dissolve_parents",
+        action="store_true",
+        help=(
+            "Give minted ancestor levels derived boundaries too: the union of "
+            "their children's geometries (consistent with the child tiling, "
+            "not authoritative cartography)"
+        ),
     )
     bake_cmd.add_argument("--out", required=True, help="Output NDJSON file")
     bake_cmd.set_defaults(func=cmd_bake)
