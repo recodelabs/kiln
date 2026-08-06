@@ -5,6 +5,7 @@ import pytest
 from kiln.bake import (
     BakeError,
     LevelSpec,
+    bake,
     check_crs,
     normalize_geometry,
     parse_alias_args,
@@ -12,6 +13,7 @@ from kiln.bake import (
     parse_level_arg,
     slugify,
 )
+from kiln.profile import NATIONAL_ADMIN_CODE_SYSTEM
 from kiln.report import Report
 
 
@@ -132,3 +134,170 @@ def test_normalize_geometry_reports_incomplete_geometry():
     incomplete = {"type": "Polygon"}  # missing coordinates key
     assert normalize_geometry(incomplete, "w1", report) is None
     assert report.counts() == {"geometry_invalid": 1}
+
+
+SQUARE = {
+    "type": "Polygon",
+    "coordinates": [[[3.0, 6.0], [4.0, 6.0], [4.0, 7.0], [3.0, 7.0], [3.0, 6.0]]],
+}
+
+LEVELS = [
+    LevelSpec(name="state", name_prop="state", code_prop="statecode"),
+    LevelSpec(name="lga", name_prop="lga", code_prop=None),
+    LevelSpec(name="ward", name_prop="ward", code_prop=None),
+]
+
+
+def feature(
+    state="Bauchi",
+    statecode="BA",
+    lga="Alkaleri",
+    ward="Alkaleri East",
+    geometry=SQUARE,
+    **extra
+):
+    properties = {"state": state, "statecode": statecode, "lga": lga, "ward": ward}
+    properties.update(extra)
+    return {"type": "Feature", "properties": properties, "geometry": geometry}
+
+
+def collection(*features):
+    return {"type": "FeatureCollection", "features": list(features)}
+
+
+def test_bake_mints_the_full_hierarchy_parents_first():
+    report = Report()
+    resources = bake(
+        collection(feature(), feature(ward="Alkaleri West")),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        report,
+    )
+
+    ids = [r["id"] for r in resources]
+    assert ids == [
+        "nga",
+        "nga-ba",
+        "nga-ba-alkaleri",
+        "nga-ba-alkaleri-alkaleri-east",
+        "nga-ba-alkaleri-alkaleri-west",
+    ]
+    by_id = {r["id"]: r for r in resources}
+    assert by_id["nga-ba"]["partOf"] == {"reference": "Location/nga"}
+    assert by_id["nga-ba"]["name"] == "Bauchi"
+    # State code comes from statecode; codeless levels get the slug path.
+    assert by_id["nga-ba"]["identifier"] == [
+        {"system": NATIONAL_ADMIN_CODE_SYSTEM, "value": "BA"}
+    ]
+    assert by_id["nga-ba-alkaleri"]["identifier"] == [
+        {"system": NATIONAL_ADMIN_CODE_SYSTEM, "value": "nga-ba-alkaleri"}
+    ]
+    # Only the feature level carries a boundary.
+    assert "extension" not in by_id["nga-ba-alkaleri"]
+    assert "extension" in by_id["nga-ba-alkaleri-alkaleri-east"]
+    assert report.counts() == {}
+
+
+def test_bake_slug_uses_code_when_the_level_has_one():
+    resources = bake(
+        collection(feature()),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        Report(),
+    )
+    assert resources[1]["id"] == "nga-ba"  # from statecode BA, not "bauchi"
+
+
+def test_bake_splits_alias_properties_on_semicolons():
+    resources = bake(
+        collection(feature(ward_alt_names="Alkaleri E.; The East")),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {"ward": "ward_alt_names"},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        Report(),
+    )
+    ward = resources[-1]
+    assert ward["alias"] == ["Alkaleri E.", "The East"]
+
+
+def test_bake_skips_a_feature_missing_a_level_name_and_reports_it():
+    report = Report()
+    resources = bake(
+        collection(feature(), feature(ward="")),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        report,
+    )
+    assert len([r for r in resources if "extension" in r]) == 1
+    assert report.counts() == {"missing_field": 1}
+
+
+def test_bake_emits_a_boundaryless_unit_for_invalid_geometry():
+    report = Report()
+    resources = bake(
+        collection(feature(geometry=None)),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        report,
+    )
+    ward = resources[-1]
+    assert ward["id"] == "nga-ba-alkaleri-alkaleri-east"
+    assert "extension" not in ward
+    assert report.counts() == {"geometry_invalid": 1}
+
+
+def test_bake_rejects_two_distinct_names_colliding_on_one_slug():
+    with pytest.raises(BakeError, match="collision"):
+        bake(
+            collection(feature(ward="Alkaleri East"), feature(ward="Alkaleri  East!")),
+            ("Nigeria", "NGA"),
+            LEVELS,
+            {},
+            NATIONAL_ADMIN_CODE_SYSTEM,
+            Report(),
+        )
+
+
+def test_bake_rejects_a_duplicate_leaf_feature():
+    with pytest.raises(BakeError, match="duplicate"):
+        bake(
+            collection(feature(), feature()),
+            ("Nigeria", "NGA"),
+            LEVELS,
+            {},
+            NATIONAL_ADMIN_CODE_SYSTEM,
+            Report(),
+        )
+
+
+def test_bake_rejects_a_level_property_present_on_no_feature():
+    with pytest.raises(BakeError, match="wardd"):
+        bake(
+            collection(feature()),
+            ("Nigeria", "NGA"),
+            [LEVELS[0], LEVELS[1], LevelSpec("ward", "wardd", None)],
+            {},
+            NATIONAL_ADMIN_CODE_SYSTEM,
+            Report(),
+        )
+
+
+def test_bake_rejects_a_non_feature_collection():
+    with pytest.raises(BakeError):
+        bake(
+            {"type": "Feature"},
+            ("Nigeria", "NGA"),
+            LEVELS,
+            {},
+            NATIONAL_ADMIN_CODE_SYSTEM,
+            Report(),
+        )

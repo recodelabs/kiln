@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import shapely
 import shapely.geometry
 
+from kiln.profile import NATIONAL_ADMIN_CODE_SYSTEM, build_location  # noqa: F401
 from kiln.report import Report
 
 
@@ -162,3 +163,121 @@ def _orient_rfc7946(shape):
     if isinstance(shape, MultiPolygon):
         return MultiPolygon([orient(polygon, sign=1.0) for polygon in shape.geoms])
     return orient(shape, sign=1.0)
+
+
+def bake(
+    collection: dict,
+    country: tuple[str, str],
+    levels: list[LevelSpec],
+    aliases: dict[str, str],
+    code_system: str,
+    report: Report,
+) -> list[dict]:
+    """Turn a one-level FeatureCollection into Location resources, parents first.
+
+    Fatal problems (wrong shape, wrong CRS, a mapping typo, slug collisions)
+    raise BakeError before anything is returned. Per-feature data problems
+    (missing name, bad geometry) are reported and cost at most that feature's
+    boundary or presence -- see the spec's error-handling section.
+    """
+    if not isinstance(collection, dict) or collection.get("type") != "FeatureCollection":
+        raise BakeError("input is not a GeoJSON FeatureCollection")
+    check_crs(collection)
+    features = [f for f in collection.get("features", []) if isinstance(f, dict)]
+
+    for level in levels:
+        if not any(
+            isinstance(f.get("properties"), dict)
+            and f["properties"].get(level.name_prop)
+            for f in features
+        ):
+            raise BakeError(
+                f"--level {level.name}: property {level.name_prop!r} is empty on every "
+                "feature -- likely a mapping typo"
+            )
+
+    country_name, country_code = country
+    root_slug = slugify(country_code)
+    # slug -> resource, insertion-ordered per level so output is parents-first.
+    minted: dict[str, dict] = {
+        root_slug: build_location(
+            root_slug, country_name, identifiers=[(code_system, country_code)]
+        )
+    }
+    # (parent_slug, child_slug) -> name that claimed it, for collision checks.
+    claimed: dict[str, str] = {}
+    # Levels are minted top-down into one dict per level, concatenated at the end.
+    per_level: list[dict[str, dict]] = [dict() for _ in levels]
+    leaf_index = len(levels) - 1
+
+    for feature in features:
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            report.add("missing_field", "<unknown>", "feature has no properties object")
+            continue
+
+        names = [str(properties.get(level.name_prop) or "").strip() for level in levels]
+        missing = next((levels[i].name for i, n in enumerate(names) if not n), None)
+        if missing is not None:
+            report.add(
+                "missing_field",
+                "<unknown>",
+                f"feature is missing {missing!r}; skipped: {names!r}",
+            )
+            continue
+
+        parent_slug = root_slug
+        for index, (level, name) in enumerate(zip(levels, names, strict=True)):
+            code = None
+            if level.code_prop:
+                code = str(properties.get(level.code_prop) or "").strip() or None
+            segment = slugify(code or name)
+            if not segment:
+                report.add("missing_field", "<unknown>", f"{level.name} name slugs to nothing")
+                break
+            slug = f"{parent_slug}-{segment}"
+
+            already = claimed.get(slug)
+            if already is not None and already != name:
+                raise BakeError(
+                    f"slug collision: {level.name} {name!r} and {already!r} both "
+                    f"slug to {slug!r} -- disambiguate the source data"
+                )
+            claimed[slug] = name
+
+            if index == leaf_index:
+                if slug in per_level[index]:
+                    raise BakeError(
+                        f"duplicate feature: {level.name} {name!r} ({slug!r}) appears "
+                        "more than once"
+                    )
+                boundary = normalize_geometry(feature.get("geometry"), slug, report)
+                per_level[index][slug] = build_location(
+                    slug,
+                    name,
+                    parent_id=parent_slug,
+                    identifiers=[(code_system, code or slug)],
+                    aliases=_read_aliases(properties, aliases.get(level.name)),
+                    boundary_geojson=boundary,
+                )
+            elif slug not in per_level[index]:
+                per_level[index][slug] = build_location(
+                    slug,
+                    name,
+                    parent_id=parent_slug,
+                    identifiers=[(code_system, code or slug)],
+                    aliases=_read_aliases(properties, aliases.get(level.name)),
+                )
+            parent_slug = slug
+
+    resources = list(minted.values())
+    for level_resources in per_level:
+        resources.extend(level_resources.values())
+    return resources
+
+
+def _read_aliases(properties: dict, alias_prop: str | None) -> list[str]:
+    if not alias_prop:
+        return []
+    raw = str(properties.get(alias_prop) or "")
+    return [part.strip() for part in raw.split(";") if part.strip()]
