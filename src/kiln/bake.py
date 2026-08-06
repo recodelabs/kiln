@@ -15,7 +15,11 @@ from dataclasses import dataclass
 import shapely
 import shapely.geometry
 
-from kiln.profile import NATIONAL_ADMIN_CODE_SYSTEM, build_location  # noqa: F401
+from kiln.profile import (  # noqa: F401
+    NATIONAL_ADMIN_CODE_SYSTEM,
+    attach_boundary,
+    build_location,
+)
 from kiln.report import Report
 
 
@@ -126,6 +130,17 @@ def normalize_geometry(
     GeoJSON bytes with exterior rings counterclockwise and holes clockwise
     (shapely's `orient(sign=1.0)` convention, applied per polygon).
     """
+    shape = _shape_from_geojson(geometry, location_id, report)
+    return None if shape is None else _geometry_bytes(shape)
+
+
+def _shape_from_geojson(geometry: dict | None, location_id: str, report: Report):
+    """Parse and validate one feature geometry into an oriented shapely shape.
+
+    The shapely half of `normalize_geometry`, split out so the
+    dissolve-parents pass can union child shapes without a serialize/parse
+    round trip. None (reported as `geometry_invalid`) if unusable.
+    """
     if not isinstance(geometry, dict) or geometry.get("type") not in (
         "Polygon",
         "MultiPolygon",
@@ -149,10 +164,12 @@ def normalize_geometry(
         report.add("geometry_invalid", location_id, reason)
         return None
 
-    oriented = _orient_rfc7946(shape)
-    return json.dumps(
-        shapely.geometry.mapping(oriented), separators=(",", ":")
-    ).encode()
+    return _orient_rfc7946(shape)
+
+
+def _geometry_bytes(shape) -> bytes:
+    """Compact RFC 7946 GeoJSON bytes for an already-oriented shape."""
+    return json.dumps(shapely.geometry.mapping(shape), separators=(",", ":")).encode()
 
 
 def _orient_rfc7946(shape):
@@ -172,6 +189,7 @@ def bake(
     aliases: dict[str, str],
     code_system: str,
     report: Report,
+    dissolve_parents: bool = False,
 ) -> list[dict]:
     """Turn a one-level FeatureCollection into Location resources, parents first.
 
@@ -179,6 +197,14 @@ def bake(
     raise BakeError before anything is returned. Per-feature data problems
     (missing name, bad geometry) are reported and cost at most that feature's
     boundary or presence -- see the spec's error-handling section.
+
+    `dissolve_parents=True` gives every minted ancestor (country, and each
+    non-leaf level) a boundary too: the union of its children's geometries.
+    These are *derived* boundaries -- exactly consistent with the child
+    tiling, which is what makes rollups and containment checks line up,
+    but not authoritative cartography; an authoritative file loaded later
+    upserts over them. Invalid child geometries (already reported) simply
+    don't contribute.
     """
     if not isinstance(collection, dict) or collection.get("type") != "FeatureCollection":
         raise BakeError("input is not a GeoJSON FeatureCollection")
@@ -209,6 +235,8 @@ def bake(
     # Levels are minted top-down into one dict per level, concatenated at the end.
     per_level: list[dict[str, dict]] = [dict() for _ in levels]
     leaf_index = len(levels) - 1
+    # parent slug -> child shapes to union, only populated when dissolving.
+    pending_dissolve: dict[str, list] = {}
 
     for feature in features:
         properties = feature.get("properties")
@@ -227,6 +255,10 @@ def bake(
             continue
 
         parent_slug = root_slug
+        # Ancestor slugs of the current feature, root first. Built during the
+        # walk because they cannot be recovered by splitting the leaf slug --
+        # "-" is both the segment separator and an ordinary in-name hyphen.
+        lineage = [root_slug]
         for index, (level, name) in enumerate(zip(levels, names, strict=True)):
             code = None
             if level.code_prop:
@@ -251,14 +283,17 @@ def bake(
                         f"duplicate feature: {level.name} {name!r} ({slug!r}) appears "
                         "more than once"
                     )
-                boundary = normalize_geometry(feature.get("geometry"), slug, report)
+                shape = _shape_from_geojson(feature.get("geometry"), slug, report)
+                if dissolve_parents and shape is not None:
+                    for ancestor in lineage:
+                        pending_dissolve.setdefault(ancestor, []).append(shape)
                 per_level[index][slug] = build_location(
                     slug,
                     name,
                     parent_id=parent_slug,
                     identifiers=[(code_system, code or slug)],
                     aliases=_read_aliases(properties, aliases.get(level.name)),
-                    boundary_geojson=boundary,
+                    boundary_geojson=None if shape is None else _geometry_bytes(shape),
                 )
             elif slug not in per_level[index]:
                 per_level[index][slug] = build_location(
@@ -269,11 +304,50 @@ def bake(
                     aliases=_read_aliases(properties, aliases.get(level.name)),
                 )
             parent_slug = slug
+            lineage.append(slug)
+
+    if pending_dissolve:
+        _dissolve_into_parents(minted, per_level[:-1], pending_dissolve, report)
 
     resources = list(minted.values())
     for level_resources in per_level:
         resources.extend(level_resources.values())
     return resources
+
+
+def _dissolve_into_parents(
+    minted: dict[str, dict],
+    parent_levels: list[dict[str, dict]],
+    pending_dissolve: dict[str, list],
+    report: Report,
+) -> None:
+    """Attach the union of child geometries to every collected ancestor.
+
+    GRID3-style inputs are clean coverages, so the union of a parent's
+    children is its boundary. A union that comes out degenerate (not
+    polygonal after make_valid) is reported and skipped -- the parent just
+    stays boundary-less, same as when dissolving is off.
+    """
+    parents_by_slug: dict[str, dict] = dict(minted)
+    for level_resources in parent_levels:
+        parents_by_slug.update(level_resources)
+
+    for slug, shapes in pending_dissolve.items():
+        resource = parents_by_slug.get(slug)
+        if resource is None:
+            continue
+        union = shapely.union_all(shapes)
+        if not union.is_valid:
+            union = shapely.make_valid(union)
+        if union.is_empty or union.geom_type not in ("Polygon", "MultiPolygon"):
+            report.add(
+                "geometry_invalid",
+                slug,
+                f"dissolved boundary is {union.geom_type}, expected Polygon or "
+                "MultiPolygon; parent left boundary-less",
+            )
+            continue
+        attach_boundary(resource, _geometry_bytes(_orient_rfc7946(union)))
 
 
 def _read_aliases(properties: dict, alias_prop: str | None) -> list[str]:

@@ -312,13 +312,22 @@ def build_location(
     if aliases:
         resource["alias"] = list(aliases)
     if boundary_geojson is not None:
-        resource["extension"] = [
-            {
-                "url": BOUNDARY_EXTENSION_URL,
-                "valueAttachment": {
-                    "contentType": GEOJSON_CONTENT_TYPE,
-                    "data": base64.b64encode(boundary_geojson).decode(),
-                },
-            }
-        ]
+        attach_boundary(resource, boundary_geojson)
     return resource
+
+
+def attach_boundary(resource: dict, boundary_geojson: bytes) -> None:
+    """Add the boundary extension (write URL, inline base64) to a Location.
+
+    Shared by `build_location` and bake's dissolve-parents pass, so the
+    written extension shape stays defined in exactly one place.
+    """
+    resource.setdefault("extension", []).append(
+        {
+            "url": BOUNDARY_EXTENSION_URL,
+            "valueAttachment": {
+                "contentType": GEOJSON_CONTENT_TYPE,
+                "data": base64.b64encode(boundary_geojson).decode(),
+            },
+        }
+    )

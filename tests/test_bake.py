@@ -328,3 +328,97 @@ def test_bake_rejects_a_non_feature_collection():
             NATIONAL_ADMIN_CODE_SYSTEM,
             Report(),
         )
+
+
+# --- dissolve-parents ---------------------------------------------------------
+
+EAST_SQUARE = {
+    "type": "Polygon",
+    "coordinates": [[[4.0, 6.0], [5.0, 6.0], [5.0, 7.0], [4.0, 7.0], [4.0, 6.0]]],
+}
+
+
+def _boundary_shape(resource):
+    import base64
+
+    import shapely.geometry
+
+    (extension,) = [e for e in resource.get("extension", []) if "valueAttachment" in e]
+    payload = json.loads(base64.b64decode(extension["valueAttachment"]["data"]))
+    return shapely.geometry.shape(payload)
+
+
+def test_bake_dissolve_parents_unions_children_at_every_level():
+    report = Report()
+    resources = bake(
+        collection(feature(), feature(ward="Alkaleri West", geometry=EAST_SQUARE)),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        report,
+        dissolve_parents=True,
+    )
+    by_id = {r["id"]: r for r in resources}
+
+    # Two adjacent unit squares union into one 2x1 polygon on every ancestor.
+    for parent_id in ("nga", "nga-ba", "nga-ba-alkaleri"):
+        shape = _boundary_shape(by_id[parent_id])
+        assert shape.geom_type == "Polygon"
+        assert shape.area == pytest.approx(2.0)
+    # Leaf boundaries are untouched.
+    assert _boundary_shape(by_id["nga-ba-alkaleri-alkaleri-east"]).area == pytest.approx(1.0)
+    assert report.counts() == {}
+
+
+def test_bake_dissolve_parents_default_stays_off():
+    resources = bake(
+        collection(feature()),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        Report(),
+    )
+    by_id = {r["id"]: r for r in resources}
+    assert "extension" not in by_id["nga-ba-alkaleri"]
+    assert "extension" not in by_id["nga"]
+
+
+def test_bake_dissolve_skips_invalid_children_but_unions_the_rest():
+    report = Report()
+    resources = bake(
+        collection(feature(), feature(ward="Alkaleri West", geometry=None)),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        report,
+        dissolve_parents=True,
+    )
+    by_id = {r["id"]: r for r in resources}
+
+    # The invalid ward contributed nothing; parents still dissolve the valid one.
+    assert _boundary_shape(by_id["nga-ba-alkaleri"]).area == pytest.approx(1.0)
+    assert "extension" not in by_id["nga-ba-alkaleri-alkaleri-west"]
+    assert report.counts() == {"geometry_invalid": 1}
+
+
+def test_bake_dissolve_separate_parents_get_separate_unions():
+    resources = bake(
+        collection(
+            feature(),
+            feature(lga="Bogoro", ward="Bogoro Central", geometry=EAST_SQUARE),
+        ),
+        ("Nigeria", "NGA"),
+        LEVELS,
+        {},
+        NATIONAL_ADMIN_CODE_SYSTEM,
+        Report(),
+        dissolve_parents=True,
+    )
+    by_id = {r["id"]: r for r in resources}
+
+    assert _boundary_shape(by_id["nga-ba-alkaleri"]).area == pytest.approx(1.0)
+    assert _boundary_shape(by_id["nga-ba-bogoro"]).area == pytest.approx(1.0)
+    assert _boundary_shape(by_id["nga-ba"]).area == pytest.approx(2.0)
