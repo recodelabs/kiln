@@ -146,7 +146,24 @@ def load(
     with the server's OperationOutcome text. Re-running is always safe --
     PUT by id upserts, so already-loaded bundles just write the same bytes
     again.
+
+    Every resource is validated up front, before any network work: a
+    malformed resource is a systematic load failure just like a bad store
+    config, so it aborts the whole load rather than surfacing as a raw
+    traceback or a rejected bundle partway through.
     """
+    seen_ids: set[str] = set()
+    for index, resource in enumerate(resources):
+        resource_id = resource.get("id") if isinstance(resource, dict) else None
+        if not isinstance(resource_id, str) or not resource_id:
+            raise LoadError(
+                f"resource at index {index} is not a valid Location (needs a "
+                f"non-empty string id): {resource!r:.200s}"
+            )
+        if resource_id in seen_ids:
+            raise LoadError(f"duplicate resource id {resource_id!r} in load input")
+        seen_ids.add(resource_id)
+
     owns_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT)
     base_url = server.rstrip("/")

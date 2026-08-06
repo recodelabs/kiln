@@ -111,6 +111,33 @@ def test_normalize_geometry_rewinds_rings_to_rfc7946():
     assert report.counts() == {}
 
 
+def test_normalize_geometry_rewinds_multipolygon_rings_to_rfc7946():
+    # Two disjoint squares, each wound clockwise on purpose, as real GRID3
+    # ward files sometimes ship MultiPolygons for split administrative units.
+    cw_multi_square = {
+        "type": "MultiPolygon",
+        "coordinates": [
+            [[[3.0, 6.0], [3.0, 7.0], [4.0, 7.0], [4.0, 6.0], [3.0, 6.0]]],
+            [[[13.0, 6.0], [13.0, 7.0], [14.0, 7.0], [14.0, 6.0], [13.0, 6.0]]],
+        ],
+    }
+    report = Report()
+    payload = normalize_geometry(cw_multi_square, "w1", report)
+
+    assert payload is not None
+    parsed = json.loads(payload)
+    assert parsed["type"] == "MultiPolygon"
+    for polygon in parsed["coordinates"]:
+        ring = polygon[0]
+        # Shoelace: positive area = counterclockwise exterior.
+        area2 = sum(
+            (x1 * y2 - x2 * y1)
+            for (x1, y1), (x2, y2) in zip(ring, ring[1:], strict=False)
+        )
+        assert area2 > 0
+    assert report.counts() == {}
+
+
 def test_normalize_geometry_reports_invalid_and_returns_none():
     report = Report()
     bowtie = {

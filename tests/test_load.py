@@ -147,6 +147,51 @@ def test_load_retries_a_503_then_succeeds():
     assert calls["bundle"] == 2
 
 
+def test_load_rejects_a_non_dict_resource_without_any_network_calls():
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"unexpected network call: {request.url}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(LoadError, match="index 1"):
+        load(
+            [{"resourceType": "Location", "id": "country"}, 5],
+            "https://fhir.test/store/fhir",
+            None,
+            client=client,
+        )
+
+
+def test_load_rejects_a_resource_without_an_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"unexpected network call: {request.url}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(LoadError, match="index 0"):
+        load(
+            [{"resourceType": "Location"}],
+            "https://fhir.test/store/fhir",
+            None,
+            client=client,
+        )
+
+
+def test_load_rejects_duplicate_ids():
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail(f"unexpected network call: {request.url}")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(LoadError, match="country"):
+        load(
+            [
+                {"resourceType": "Location", "id": "country"},
+                {"resourceType": "Location", "id": "country"},
+            ],
+            "https://fhir.test/store/fhir",
+            None,
+            client=client,
+        )
+
+
 def test_load_raises_with_the_server_body_after_exhausting_retries():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/metadata"):
