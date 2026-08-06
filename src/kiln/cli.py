@@ -31,6 +31,12 @@ from kiln.extract import (
 from kiln.frame import build_frame
 from kiln.inspect import format_summary, summarize
 from kiln.load import DEFAULT_BATCH_SIZE, LoadError, load
+from kiln.points import (
+    bake_points,
+    parse_identifier_arg,
+    parse_parent_arg,
+    parse_where_arg,
+)
 from kiln.profile import BOUNDARY_EXTENSION_URLS, NATIONAL_ADMIN_CODE_SYSTEM, shred
 from kiln.report import Report, check_duplicate_pcodes, check_points_within_parents
 from kiln.shape import as_list
@@ -226,6 +232,50 @@ def cmd_bake(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bake_points(args: argparse.Namespace) -> int:
+    import csv
+
+    source = Path(args.input)
+    admin_path = Path(args.admin)
+    for path in (source, admin_path):
+        if not path.exists():
+            print(f"Input file not found: {path}", file=sys.stderr)
+            return USAGE_ERROR
+
+    report = Report()
+    try:
+        admin_resources = list(read_ndjson(admin_path, report))
+    except MalformedNdjsonError as exc:
+        print(str(exc), file=sys.stderr)
+        return USAGE_ERROR
+
+    with source.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    try:
+        resources = bake_points(
+            rows,
+            admin_resources,
+            type_code=args.type,
+            name_col=args.name_col,
+            lat_col=args.lat_col,
+            lon_col=args.lon_col,
+            id_col=args.id_col,
+            parents=[parse_parent_arg(parent) for parent in args.parent],
+            identifiers=[parse_identifier_arg(item) for item in args.identifier],
+            where=[parse_where_arg(item) for item in args.where],
+            report=report,
+        )
+    except BakeError as exc:
+        print(f"kiln bake-points: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+
+    count = write_ndjson(resources, Path(args.out))
+    print(f"Wrote {count} Locations to {args.out}")
+    print(report.summary())
+    return 0
+
+
 def cmd_load(args: argparse.Namespace) -> int:
     source = Path(args.input)
     if not source.exists():
@@ -385,6 +435,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bake_cmd.add_argument("--out", required=True, help="Output NDJSON file")
     bake_cmd.set_defaults(func=cmd_bake)
+
+    points_cmd = subparsers.add_parser(
+        "bake-points",
+        help="Convert point rows (CSV) to site Location NDJSON linked into an admin registry",
+    )
+    points_cmd.add_argument("--in", dest="input", required=True, help="CSV file")
+    points_cmd.add_argument(
+        "--admin",
+        required=True,
+        help="Baked admin-hierarchy NDJSON to resolve parents against (from kiln bake)",
+    )
+    points_cmd.add_argument(
+        "--type",
+        required=True,
+        help="ICR location-type code for every row: facility, school, ...",
+    )
+    points_cmd.add_argument("--name-col", dest="name_col", required=True)
+    points_cmd.add_argument("--lat-col", dest="lat_col", required=True)
+    points_cmd.add_argument("--lon-col", dest="lon_col", required=True)
+    points_cmd.add_argument(
+        "--id-col",
+        dest="id_col",
+        required=True,
+        help="Column holding a stable unique id usable as the FHIR resource id",
+    )
+    points_cmd.add_argument(
+        "--parent",
+        action="append",
+        required=True,
+        help=(
+            "LEVEL=COLUMN, repeatable and ordered top-down (e.g. state=state "
+            "lga=lga ward=ward); rows link to the deepest level that resolves"
+        ),
+    )
+    points_cmd.add_argument(
+        "--identifier",
+        action="append",
+        default=[],
+        help="SYSTEM_URI=COLUMN, repeatable; empty column values are dropped",
+    )
+    points_cmd.add_argument(
+        "--where",
+        action="append",
+        default=[],
+        help="COLUMN=VALUE row filter, repeatable (all must match)",
+    )
+    points_cmd.add_argument("--out", required=True, help="Output NDJSON file")
+    points_cmd.set_defaults(func=cmd_bake_points)
 
     load_cmd = subparsers.add_parser(
         "load", help="Upsert Location NDJSON into a FHIR store"

@@ -316,6 +316,50 @@ def build_location(
     return resource
 
 
+def build_point_location(
+    location_id: str,
+    name: str,
+    *,
+    type_code: str,
+    parent_id: str | None = None,
+    identifiers: list[tuple[str, str]],
+    position: tuple[float, float] | None = None,
+) -> dict:
+    """Build one site-shaped Location (facility, school, ...) per ICRLocation.
+
+    The point-feature sibling of `build_location`: type comes from
+    ICRLocationTypeCS (`facility`, `school`, ...), physicalType is `si`
+    Site (the IG's own convention for service points -- see the Rokupr CHC
+    example), geometry is a GPS `position` rather than a boundary, and
+    `partOf` hangs the site under its admin parent (typically the ward).
+    Sites are not bound by the admin-unit >=1-identifier rule, but callers
+    are expected to pass the source's stable identifiers anyway.
+    """
+    resource: dict = {
+        "resourceType": "Location",
+        "id": location_id,
+        "meta": {"profile": [ICR_LOCATION_PROFILE_URL]},
+        "name": name,
+        "status": "active",
+        "type": [{"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": type_code}]}],
+        "physicalType": {
+            "coding": [
+                {"system": PHYSICAL_TYPE_SYSTEM, "code": "si", "display": "Site"}
+            ]
+        },
+    }
+    if identifiers:
+        resource["identifier"] = [
+            {"system": system, "value": value} for system, value in identifiers
+        ]
+    if parent_id:
+        resource["partOf"] = {"reference": f"Location/{parent_id}"}
+    if position is not None:
+        longitude, latitude = position
+        resource["position"] = {"longitude": longitude, "latitude": latitude}
+    return resource
+
+
 def attach_boundary(resource: dict, boundary_geojson: bytes) -> None:
     """Add the boundary extension (write URL, inline base64) to a Location.
 

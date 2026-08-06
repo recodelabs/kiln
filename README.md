@@ -200,6 +200,31 @@ reported and skipped; mapping problems (a `--level` property that matches
 nothing, two units slugging to the same id, a non-WGS84 CRS) abort before
 anything is written.
 
+### Facility and other point sites
+
+`kiln bake-points` does the same for point features from a CSV — health
+facilities, schools, any site — linking each row into an already-baked
+admin registry by name (names and aliases, slug-normalized, so `Tama/Daye`
+matches `Tama Daye`). Rows whose ward doesn't resolve link to the deepest
+ancestor that does and are reported as `parent_unresolved`.
+
+```bash
+uv run kiln bake-points \
+  --in facilities.csv \
+  --admin wards.ndjson \
+  --type facility \
+  --name-col facility_name --lat-col latitude --lon-col longitude \
+  --id-col globalid \
+  --parent state=state --parent lga=lga --parent ward=ward \
+  --identifier "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code=nhfr_facility_code" \
+  --where state=Bauchi \
+  --out facilities.ndjson
+```
+
+Sites come out `type` = the given ICR location-type code, `physicalType` =
+`si` Site, with `position` from the lat/lon columns — then `kiln load`
+upserts them like any other Location NDJSON.
+
 By default only the feature level carries geometry — the minted ancestors
 (state, LGA) are boundary-less until an authoritative file for their level
 is loaded. Pass `--dissolve-parents` to give every ancestor a *derived*
