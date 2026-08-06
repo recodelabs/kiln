@@ -473,3 +473,101 @@ def test_cmd_run_propagates_a_nonzero_exit_code_from_transform(tmp_path, monkeyp
     assert code == 2
     assert (out / "locations.ndjson").exists()  # extract's half did complete
     assert not list(out.rglob("*.parquet"))  # transform's half did not
+
+
+BAKE_COLLECTION = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {"state": "Bauchi", "statecode": "BA",
+                           "lga": "Alkaleri", "ward": "Alkaleri East"},
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[3.0, 6.0], [4.0, 6.0], [4.0, 7.0],
+                                 [3.0, 7.0], [3.0, 6.0]]],
+            },
+        }
+    ],
+}
+
+
+def test_bake_writes_profiled_ndjson(tmp_path, capsys):
+    source = tmp_path / "wards.geojson"
+    source.write_text(json.dumps(BAKE_COLLECTION))
+    out = tmp_path / "locations.ndjson"
+
+    code = main([
+        "bake", "--in", str(source),
+        "--country", "Nigeria=NGA",
+        "--level", "state=state:statecode",
+        "--level", "lga=lga",
+        "--level", "ward=ward",
+        "--out", str(out),
+    ])
+
+    assert code == 0
+    lines = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["id"] for r in lines] == [
+        "nga", "nga-ba", "nga-ba-alkaleri", "nga-ba-alkaleri-alkaleri-east",
+    ]
+    assert "Wrote 4 Locations" in capsys.readouterr().out
+
+
+def test_bake_exits_2_on_a_mapping_typo(tmp_path, capsys):
+    source = tmp_path / "wards.geojson"
+    source.write_text(json.dumps(BAKE_COLLECTION))
+
+    code = main([
+        "bake", "--in", str(source),
+        "--country", "Nigeria=NGA",
+        "--level", "ward=wardd",
+        "--out", str(tmp_path / "out.ndjson"),
+    ])
+
+    assert code == 2
+    assert "wardd" in capsys.readouterr().err
+    assert not (tmp_path / "out.ndjson").exists()
+
+
+def test_load_reads_ndjson_and_calls_load(tmp_path, monkeypatch, capsys):
+    ndjson = tmp_path / "locations.ndjson"
+    ndjson.write_text('{"resourceType":"Location","id":"nga"}\n')
+    seen = {}
+
+    def fake_load(resources, server, token, retries, batch_size):
+        seen.update(resources=list(resources), server=server, token=token,
+                    retries=retries, batch_size=batch_size)
+        return len(seen["resources"])
+
+    import kiln.cli as cli_module
+    monkeypatch.setattr(cli_module, "load", fake_load)
+
+    code = main([
+        "load", "--server", "https://fhir.test/fhir",
+        "--token", "tok", "--in", str(ndjson),
+    ])
+
+    assert code == 0
+    assert seen["server"] == "https://fhir.test/fhir"
+    assert seen["resources"][0]["id"] == "nga"
+    assert "loaded: 1 upserted" in capsys.readouterr().out
+
+
+def test_load_exits_2_on_load_error(tmp_path, monkeypatch, capsys):
+    from kiln.load import LoadError
+
+    ndjson = tmp_path / "locations.ndjson"
+    ndjson.write_text('{"resourceType":"Location","id":"nga"}\n')
+
+    import kiln.cli as cli_module
+
+    def failing_load(*args, **kwargs):
+        raise LoadError("store does not advertise update-as-create")
+
+    monkeypatch.setattr(cli_module, "load", failing_load)
+
+    code = main(["load", "--server", "https://fhir.test/fhir", "--in", str(ndjson)])
+
+    assert code == 2
+    assert "update-as-create" in capsys.readouterr().err

@@ -9,6 +9,13 @@ import sys
 from pathlib import Path
 
 from kiln import __version__
+from kiln.bake import (
+    BakeError,
+    bake,
+    parse_alias_args,
+    parse_country_arg,
+    parse_level_arg,
+)
 from kiln.cache import DEFAULT_CACHE_DIR
 from kiln.extract import (
     DEFAULT_CONCURRENCY,
@@ -23,7 +30,8 @@ from kiln.extract import (
 )
 from kiln.frame import build_frame
 from kiln.inspect import format_summary, summarize
-from kiln.profile import BOUNDARY_EXTENSION_URL, shred
+from kiln.load import DEFAULT_BATCH_SIZE, LoadError, load
+from kiln.profile import BOUNDARY_EXTENSION_URLS, NATIONAL_ADMIN_CODE_SYSTEM, shred
 from kiln.report import Report, check_duplicate_pcodes, check_points_within_parents
 from kiln.shape import as_list
 from kiln.write import (
@@ -41,7 +49,8 @@ def _note_unresolved_boundary_urls(resources: list[dict], report: Report) -> Non
     """transform is offline; a url-only boundary cannot be fetched here."""
     for resource in resources:
         for extension in as_list(resource.get("extension")):
-            if not isinstance(extension, dict) or extension.get("url") != BOUNDARY_EXTENSION_URL:
+            ext_url = extension.get("url") if isinstance(extension, dict) else None
+            if not isinstance(extension, dict) or ext_url not in BOUNDARY_EXTENSION_URLS:
                 continue
             attachment = extension.get("valueAttachment") or {}
             if not isinstance(attachment, dict):
@@ -182,6 +191,70 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bake(args: argparse.Namespace) -> int:
+    source = Path(args.input)
+    if not source.exists():
+        print(f"Input file not found: {source}", file=sys.stderr)
+        return USAGE_ERROR
+
+    report = Report()
+    try:
+        collection = json.loads(source.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        print(f"kiln bake: {source} is not valid JSON: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+
+    try:
+        resources = bake(
+            collection,
+            parse_country_arg(args.country),
+            [parse_level_arg(level) for level in args.level],
+            parse_alias_args(args.alias),
+            args.code_system,
+            report,
+        )
+    except BakeError as exc:
+        # Fatal mapping/input problem: nothing written (same contract as
+        # BoundaryFetchAborted in cmd_extract).
+        print(f"kiln bake: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+
+    count = write_ndjson(resources, Path(args.out))
+    print(f"Wrote {count} Locations to {args.out}")
+    print(report.summary())
+    return 0
+
+
+def cmd_load(args: argparse.Namespace) -> int:
+    source = Path(args.input)
+    if not source.exists():
+        print(f"Input file not found: {source}", file=sys.stderr)
+        return USAGE_ERROR
+
+    report = Report()
+    try:
+        resources = list(read_ndjson(source, report))
+    except MalformedNdjsonError as exc:
+        print(str(exc), file=sys.stderr)
+        return USAGE_ERROR
+
+    try:
+        count = load(
+            resources,
+            args.server,
+            args.token,
+            retries=args.retries,
+            batch_size=args.batch_size,
+        )
+    except LoadError as exc:
+        print(f"kiln load: {exc}", file=sys.stderr)
+        return USAGE_ERROR
+
+    print(f"loaded: {count} upserted")
+    print(report.summary())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="kiln", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -270,6 +343,58 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_cmd = subparsers.add_parser("inspect", help="Summarize a written dataset")
     inspect_cmd.add_argument("--out", required=True, help="Dataset directory")
     inspect_cmd.set_defaults(func=cmd_inspect)
+
+    bake_cmd = subparsers.add_parser(
+        "bake", help="Convert one-level admin GeoJSON to Location NDJSON"
+    )
+    bake_cmd.add_argument("--in", dest="input", required=True, help="GeoJSON file")
+    bake_cmd.add_argument(
+        "--country", required=True, help="Admin0 root as NAME=CODE, e.g. 'Nigeria=NGA'"
+    )
+    bake_cmd.add_argument(
+        "--level",
+        action="append",
+        required=True,
+        help=(
+            "LEVEL=NAME_PROP[:CODE_PROP], repeatable and ordered; the last "
+            "--level is the feature level and carries the geometry"
+        ),
+    )
+    bake_cmd.add_argument(
+        "--alias",
+        action="append",
+        default=[],
+        help="LEVEL=PROPERTY holding ';'-separated alternate names",
+    )
+    bake_cmd.add_argument(
+        "--code-system",
+        dest="code_system",
+        default=NATIONAL_ADMIN_CODE_SYSTEM,
+        help=f"Identifier system URI for admin codes (default: {NATIONAL_ADMIN_CODE_SYSTEM})",
+    )
+    bake_cmd.add_argument("--out", required=True, help="Output NDJSON file")
+    bake_cmd.set_defaults(func=cmd_bake)
+
+    load_cmd = subparsers.add_parser(
+        "load", help="Upsert Location NDJSON into a FHIR store"
+    )
+    load_cmd.add_argument("--server", required=True)
+    load_cmd.add_argument("--token", default=None)
+    load_cmd.add_argument("--in", dest="input", required=True, help="NDJSON file")
+    load_cmd.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="Attempts per bundle before giving up (with backoff)",
+    )
+    load_cmd.add_argument(
+        "--batch-size",
+        dest="batch_size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help=f"Resources per transaction bundle (default: {DEFAULT_BATCH_SIZE})",
+    )
+    load_cmd.set_defaults(func=cmd_load)
 
     return parser
 

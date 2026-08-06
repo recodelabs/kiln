@@ -159,6 +159,47 @@ A single-line Bundle (exactly what `kiln extract`/`write_ndjson` produce) is
 still supported — only a Bundle reformatted across multiple lines afterward
 is not.
 
+## Importing admin boundaries
+
+The reverse direction: a one-level admin GeoJSON file (all features at the
+same level, e.g. GRID3 wards) becomes ICRLocation-profiled resources in the
+store, ancestors minted from feature properties.
+
+```bash
+# Offline: GeoJSON -> Location NDJSON (inspect/validate before loading)
+uv run kiln bake \
+  --in data/GRID3_NGA_operational_wards_v3_0.geojson \
+  --country "Nigeria=NGA" \
+  --level state=state:statecode \
+  --level lga=lga \
+  --level ward=ward \
+  --alias lga=lga_alt_names --alias ward=ward_alt_names \
+  --out wards.ndjson
+
+# Network: NDJSON -> FHIR store (idempotent -- re-runs upsert in place)
+uv run kiln load \
+  --server https://healthcare.googleapis.com/v1/projects/.../fhir \
+  --token "$(gcloud auth print-access-token)" \
+  --in wards.ndjson
+```
+
+`--level` flags are ordered: the sequence is the hierarchy below the
+country, and the last one is the feature level that carries the geometry.
+Each flag is `LEVEL=NAME_PROP[:CODE_PROP]` — which property holds the
+unit's name, and (optionally) its code. Units get slug-path ids
+(`nga-ba-alkaleri-alkaleri-east`) built from codes where the source has
+them, names otherwise, so loading is `PUT`-idempotent.
+
+`kiln load` requires the store to support update-as-create (on Google
+Healthcare API: `enableUpdateCreate=true`); it checks the store's
+CapabilityStatement up front and refuses to half-load. A bundle failure
+aborts the run — re-running the whole load is always safe.
+
+Data problems (a feature missing its ward name, an invalid polygon) are
+reported and skipped; mapping problems (a `--level` property that matches
+nothing, two units slugging to the same id, a non-WGS84 CRS) abort before
+anything is written.
+
 ## Verified example
 
 Running `transform` against the test fixture (`tests/fixtures/locations.ndjson`,

@@ -5,10 +5,17 @@ import pytest
 from kiln.profile import (
     BOUNDARY_EXTENSION_URL,
     DELIVERY_STRATEGY_EXTENSION_URL,
+    GEOJSON_CONTENT_TYPE,
     GERS_SYSTEM,
+    HL7_BOUNDARY_EXTENSION_URL,
+    ICR_LOCATION_PROFILE_URL,
+    LOCATION_TYPE_SYSTEM,
+    NATIONAL_ADMIN_CODE_SYSTEM,
     OVERLAYS_EXTENSION_URL,
+    PHYSICAL_TYPE_SYSTEM,
     PCODE_SYSTEM,
     SETTLEMENT_TYPE_EXTENSION_URL,
+    build_location,
     shred,
 )
 from kiln.report import Report
@@ -414,3 +421,84 @@ def test_shred_guards_against_non_string_overlays_reference():
     assert raw.id == "loc-1"
     assert raw.overlays_admin_unit_ids == []
     # Should succeed without error
+
+
+WARD_GEOJSON = b'{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}'
+
+
+def test_build_location_produces_a_profiled_admin_unit():
+    resource = build_location(
+        "nga-ba",
+        "Bauchi",
+        parent_id="nga",
+        identifiers=[(NATIONAL_ADMIN_CODE_SYSTEM, "BA")],
+    )
+
+    assert resource["resourceType"] == "Location"
+    assert resource["id"] == "nga-ba"
+    assert resource["meta"]["profile"] == [ICR_LOCATION_PROFILE_URL]
+    assert resource["name"] == "Bauchi"
+    assert resource["status"] == "active"
+    assert resource["type"][0]["coding"][0] == {
+        "system": LOCATION_TYPE_SYSTEM,
+        "code": "admin-unit",
+    }
+    assert resource["physicalType"]["coding"][0]["system"] == PHYSICAL_TYPE_SYSTEM
+    assert resource["physicalType"]["coding"][0]["code"] == "jdn"
+    assert resource["partOf"] == {"reference": "Location/nga"}
+    assert resource["identifier"] == [
+        {"system": NATIONAL_ADMIN_CODE_SYSTEM, "value": "BA"}
+    ]
+    assert "alias" not in resource
+    assert "extension" not in resource
+
+
+def test_build_location_root_has_no_partof():
+    resource = build_location(
+        "nga", "Nigeria", identifiers=[(NATIONAL_ADMIN_CODE_SYSTEM, "NGA")]
+    )
+    assert "partOf" not in resource
+
+
+def test_build_location_inlines_the_boundary_as_base64():
+    resource = build_location(
+        "nga-ba-alkaleri-alkaleri-east",
+        "Alkaleri East",
+        parent_id="nga-ba-alkaleri",
+        identifiers=[(NATIONAL_ADMIN_CODE_SYSTEM, "nga-ba-alkaleri-alkaleri-east")],
+        aliases=["Alkaleri E."],
+        boundary_geojson=WARD_GEOJSON,
+    )
+
+    assert resource["alias"] == ["Alkaleri E."]
+    (extension,) = resource["extension"]
+    assert extension["url"] == BOUNDARY_EXTENSION_URL
+    attachment = extension["valueAttachment"]
+    assert attachment["contentType"] == GEOJSON_CONTENT_TYPE
+    assert base64.b64decode(attachment["data"]) == WARD_GEOJSON
+
+
+def test_build_location_requires_at_least_one_identifier():
+    import pytest
+
+    with pytest.raises(ValueError):
+        build_location("nga", "Nigeria", identifiers=[])
+
+
+def test_shred_reads_a_boundary_under_the_hl7_canonical_url():
+    resource = {
+        "resourceType": "Location",
+        "id": "w1",
+        "extension": [
+            {
+                "url": HL7_BOUNDARY_EXTENSION_URL,
+                "valueAttachment": {
+                    "contentType": "application/geo+json",
+                    "data": base64.b64encode(WARD_GEOJSON).decode(),
+                },
+            }
+        ],
+    }
+    raw = shred(resource, Report())
+    assert raw.boundary is not None
+    assert raw.boundary.data == WARD_GEOJSON
