@@ -33,6 +33,15 @@ GEOJSON_CONTENT_TYPE = "application/geo+json"
 
 ADMIN_UNIT_TYPE = "admin-unit"
 
+ICR_LOCATION_PROFILE_URL = (
+    "https://icr.healthcampaigns.org/StructureDefinition/ICRLocation"
+)
+LOCATION_TYPE_SYSTEM = "https://icr.healthcampaigns.org/CodeSystem/icr-location-type"
+PHYSICAL_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/location-physical-type"
+NATIONAL_ADMIN_CODE_SYSTEM = (
+    "https://icr.healthcampaigns.org/identifiers/national-admin-code"
+)
+
 
 @dataclass
 class BoundaryRef:
@@ -243,3 +252,67 @@ def shred(resource: dict, report: Report) -> RawLocation | None:
             raw.delivery_strategy = extension.get("valueCode")
 
     return raw
+
+
+def build_location(
+    location_id: str,
+    name: str,
+    *,
+    parent_id: str | None = None,
+    identifiers: list[tuple[str, str]],
+    aliases: list[str] | None = None,
+    boundary_geojson: bytes | None = None,
+) -> dict:
+    """Build one admin-unit Location conforming to ICRLocation.
+
+    The write-side twin of `shred`: bake constructs resources only through
+    this function, so the emitted shape lives next to the parsed one. Every
+    admin unit must carry >=1 identifier (IG rule icr-loc-admin-id), so an
+    empty `identifiers` is a programming error, not a data problem.
+    """
+    if not identifiers:
+        raise ValueError(
+            f"admin unit {location_id!r} must carry at least one identifier"
+        )
+
+    resource: dict = {
+        "resourceType": "Location",
+        "id": location_id,
+        "meta": {"profile": [ICR_LOCATION_PROFILE_URL]},
+        "name": name,
+        "status": "active",
+        "type": [
+            {
+                "coding": [
+                    {"system": LOCATION_TYPE_SYSTEM, "code": ADMIN_UNIT_TYPE}
+                ]
+            }
+        ],
+        "physicalType": {
+            "coding": [
+                {
+                    "system": PHYSICAL_TYPE_SYSTEM,
+                    "code": "jdn",
+                    "display": "Jurisdiction",
+                }
+            ]
+        },
+        "identifier": [
+            {"system": system, "value": value} for system, value in identifiers
+        ],
+    }
+    if parent_id:
+        resource["partOf"] = {"reference": f"Location/{parent_id}"}
+    if aliases:
+        resource["alias"] = list(aliases)
+    if boundary_geojson is not None:
+        resource["extension"] = [
+            {
+                "url": BOUNDARY_EXTENSION_URL,
+                "valueAttachment": {
+                    "contentType": GEOJSON_CONTENT_TYPE,
+                    "data": base64.b64encode(boundary_geojson).decode(),
+                },
+            }
+        ]
+    return resource
