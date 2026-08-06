@@ -316,6 +316,60 @@ def build_location(
     return resource
 
 
+ORG_TYPE_SYSTEM = "http://terminology.hl7.org/CodeSystem/organization-type"
+ICR_FACILITY_ORG_PROFILE_URL = (
+    "https://icr.healthcampaigns.org/StructureDefinition/ICRFacilityOrganization"
+)
+
+
+def build_facility_organization(
+    org_id: str,
+    name: str,
+    *,
+    identifiers: list[tuple[str, str]],
+    type_concepts: list[tuple[str, str, str, str | None]],
+) -> dict:
+    """Build the accountable facility entity of the mCSD pairing.
+
+    Organization.type is the source of truth for facility classification:
+    the generic `prov` coding always comes first, then one CodeableConcept
+    per (system, code, display, text) in `type_concepts` -- the national
+    tier and ownership axes, with the country-specific kind as text. The
+    paired Location points here via managingOrganization; registry codes
+    (`identifiers`) live on this entity, not on the place.
+    """
+    types: list[dict] = [
+        {
+            "coding": [
+                {
+                    "system": ORG_TYPE_SYSTEM,
+                    "code": "prov",
+                    "display": "Healthcare Provider",
+                }
+            ]
+        }
+    ]
+    for system, code, display, text in type_concepts:
+        concept: dict = {"coding": [{"system": system, "code": code, "display": display}]}
+        if text:
+            concept["text"] = text
+        types.append(concept)
+
+    resource: dict = {
+        "resourceType": "Organization",
+        "id": org_id,
+        "meta": {"profile": [ICR_FACILITY_ORG_PROFILE_URL]},
+        "active": True,
+        "name": name,
+        "type": types,
+    }
+    if identifiers:
+        resource["identifier"] = [
+            {"system": system, "value": value} for system, value in identifiers
+        ]
+    return resource
+
+
 def build_point_location(
     location_id: str,
     name: str,
@@ -324,6 +378,7 @@ def build_point_location(
     parent_id: str | None = None,
     identifiers: list[tuple[str, str]],
     position: tuple[float, float] | None = None,
+    managing_org_id: str | None = None,
 ) -> dict:
     """Build one site-shaped Location (facility, school, ...) per ICRLocation.
 
@@ -357,6 +412,10 @@ def build_point_location(
     if position is not None:
         longitude, latitude = position
         resource["position"] = {"longitude": longitude, "latitude": latitude}
+    if managing_org_id:
+        resource["managingOrganization"] = {
+            "reference": f"Organization/{managing_org_id}"
+        }
     return resource
 
 

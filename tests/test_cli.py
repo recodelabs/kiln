@@ -616,7 +616,7 @@ def test_bake_points_links_facilities_and_filters(tmp_path, capsys):
     assert resource["physicalType"]["coding"][0]["code"] == "si"
     assert resource["partOf"] == {"reference": "Location/nga-ba-alkaleri-alkaleri-east"}
     assert resource["position"] == {"longitude": 9.9, "latitude": 10.5}
-    assert "Wrote 1 Locations" in capsys.readouterr().out
+    assert "Wrote 1 resources" in capsys.readouterr().out
 
 
 def test_bake_points_exits_2_on_bad_mapping(tmp_path, capsys):
