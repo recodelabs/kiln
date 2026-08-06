@@ -1,6 +1,13 @@
 import pytest
+import httpx
 
-from kiln.load import LoadError, build_bundles, order_parents_first
+import kiln.load as load_module
+from kiln.load import LoadError, build_bundles, check_update_create, load, order_parents_first
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    monkeypatch.setattr(load_module.time, "sleep", lambda seconds: None)
 
 
 def location(location_id, parent_id=None):
@@ -43,3 +50,120 @@ def test_build_bundles_chunks_put_entries_parents_first():
     assert first_entry["resource"]["id"] == "country"
     assert first_entry["request"] == {"method": "PUT", "url": "Location/country"}
     assert bundles[1]["entry"][0]["request"]["url"] == "Location/ward"
+
+
+CAPABILITY_OK = {
+    "resourceType": "CapabilityStatement",
+    "rest": [
+        {
+            "mode": "server",
+            "resource": [
+                {"type": "Patient", "updateCreate": False},
+                {"type": "Location", "updateCreate": True},
+            ],
+        }
+    ],
+}
+
+
+def capability(update_create):
+    payload = {
+        "resourceType": "CapabilityStatement",
+        "rest": [{"mode": "server", "resource": [{"type": "Location"}]}],
+    }
+    if update_create is not None:
+        payload["rest"][0]["resource"][0]["updateCreate"] = update_create
+    return payload
+
+
+def test_check_update_create_passes_when_the_store_supports_it():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/metadata")
+        return httpx.Response(200, json=CAPABILITY_OK)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    check_update_create("https://fhir.test/store/fhir", None, client)
+
+
+def test_check_update_create_rejects_a_store_without_it():
+    for payload in (capability(False), capability(None)):
+        client = httpx.Client(
+            transport=httpx.MockTransport(lambda req, p=payload: httpx.Response(200, json=p))
+        )
+        with pytest.raises(LoadError, match="enableUpdateCreate"):
+            check_update_create("https://fhir.test/store/fhir", None, client)
+
+
+def test_load_puts_every_resource_and_returns_the_count():
+    posted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/metadata"):
+            return httpx.Response(200, json=CAPABILITY_OK)
+        assert request.method == "POST"
+        import json as json_module
+
+        posted.append(json_module.loads(request.content))
+        return httpx.Response(
+            200, json={"resourceType": "Bundle", "type": "transaction-response"}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resources = [
+        {"resourceType": "Location", "id": "country"},
+        {"resourceType": "Location", "id": "state",
+         "partOf": {"reference": "Location/country"}},
+    ]
+
+    count = load(resources, "https://fhir.test/store/fhir", "tok", client=client,
+                 batch_size=1)
+
+    assert count == 2
+    assert len(posted) == 2
+    assert posted[0]["entry"][0]["request"]["url"] == "Location/country"
+
+
+def test_load_retries_a_503_then_succeeds():
+    calls = {"bundle": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/metadata"):
+            return httpx.Response(200, json=CAPABILITY_OK)
+        calls["bundle"] += 1
+        if calls["bundle"] == 1:
+            return httpx.Response(503)
+        return httpx.Response(
+            200, json={"resourceType": "Bundle", "type": "transaction-response"}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    count = load(
+        [{"resourceType": "Location", "id": "x"}],
+        "https://fhir.test/store/fhir",
+        None,
+        client=client,
+    )
+    assert count == 1
+    assert calls["bundle"] == 2
+
+
+def test_load_raises_with_the_server_body_after_exhausting_retries():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/metadata"):
+            return httpx.Response(200, json=CAPABILITY_OK)
+        return httpx.Response(
+            400,
+            json={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "details": {"text": "bad partOf"}}],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(LoadError, match="bad partOf"):
+        load(
+            [{"resourceType": "Location", "id": "x"}],
+            "https://fhir.test/store/fhir",
+            None,
+            client=client,
+        )
