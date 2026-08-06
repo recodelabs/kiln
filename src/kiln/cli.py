@@ -34,6 +34,7 @@ from kiln.load import DEFAULT_BATCH_SIZE, LoadError, load
 from kiln.points import (
     bake_points,
     parse_identifier_arg,
+    parse_org_type_arg,
     parse_parent_arg,
     parse_where_arg,
 )
@@ -265,13 +266,16 @@ def cmd_bake_points(args: argparse.Namespace) -> int:
             identifiers=[parse_identifier_arg(item) for item in args.identifier],
             where=[parse_where_arg(item) for item in args.where],
             report=report,
+            paired_org=args.paired_org,
+            org_identifiers=[parse_identifier_arg(i) for i in args.org_identifier],
+            org_type_codings=[parse_org_type_arg(i) for i in args.org_type_coding],
         )
     except BakeError as exc:
         print(f"kiln bake-points: {exc}", file=sys.stderr)
         return USAGE_ERROR
 
     count = write_ndjson(resources, Path(args.out))
-    print(f"Wrote {count} Locations to {args.out}")
+    print(f"Wrote {count} resources to {args.out}")
     print(report.summary())
     return 0
 
@@ -480,6 +484,38 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="COLUMN=VALUE row filter, repeatable (all must match)",
+    )
+    points_cmd.add_argument(
+        "--paired-org",
+        dest="paired_org",
+        action="store_true",
+        help=(
+            "Emit the mCSD facility pairing: per row, an Organization "
+            "(the accountable entity, id org-<row id>) plus the Location "
+            "referencing it via managingOrganization"
+        ),
+    )
+    points_cmd.add_argument(
+        "--org-identifier",
+        dest="org_identifier",
+        action="append",
+        default=[],
+        help=(
+            "SYSTEM_URI=COLUMN for the paired Organization, repeatable -- "
+            "the registry codes (e.g. NHFR) that identify the entity"
+        ),
+    )
+    points_cmd.add_argument(
+        "--org-type-coding",
+        dest="org_type_coding",
+        action="append",
+        default=[],
+        help=(
+            "SYSTEM_URI=CODE_COLUMN[:TEXT_COLUMN] for Organization.type, "
+            "repeatable -- cell value slugified into the code (raw value as "
+            "display), optional text column for the country-specific kind; "
+            "'prov' is always added first"
+        ),
     )
     points_cmd.add_argument("--out", required=True, help="Output NDJSON file")
     points_cmd.set_defaults(func=cmd_bake_points)

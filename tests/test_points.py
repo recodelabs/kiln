@@ -167,3 +167,75 @@ def test_bake_points_empty_identifier_column_is_dropped_not_emitted():
 def test_bake_points_duplicate_ids_are_fatal():
     with pytest.raises(BakeError, match="duplicate"):
         run_bake_points([facility_row(), facility_row()])
+
+
+# --- paired facility Organizations -------------------------------------------
+
+FACILITY_TYPE_CS = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs"
+OWNERSHIP_CS = "https://icr.healthcampaigns.org/CodeSystem/icr-ownership-cs"
+
+
+def run_bake_points_paired(rows, report=None):
+    return bake_points(
+        rows,
+        admin_registry(),
+        type_code="facility",
+        name_col="facility_name",
+        lat_col="latitude",
+        lon_col="longitude",
+        id_col="globalid",
+        parents=PARENTS,
+        identifiers=[(GRID3, "globalid")],
+        where=[],
+        report=report if report is not None else Report(),
+        paired_org=True,
+        org_identifiers=[(NHFR, "nhfr_code")],
+        org_type_codings=[
+            (FACILITY_TYPE_CS, "level", "level_detail"),
+            (OWNERSHIP_CS, "ownership", None),
+        ],
+    )
+
+
+def paired_row(**overrides):
+    row = facility_row(level="Primary", level_detail="Primary Health Center",
+                       ownership="Public")
+    row.update(overrides)
+    return row
+
+
+def test_paired_org_emits_organization_and_links_location():
+    resources = run_bake_points_paired([paired_row()])
+
+    assert [r["resourceType"] for r in resources] == ["Organization", "Location"]
+    org, location = resources
+
+    assert org["id"] == "org-9c2b58dd-1e99-49b9-970e-eabce1c7dd10"
+    assert org["name"] == "Tilde Primary Health Care Center"
+    assert org["active"] is True
+    # prov + tier (with detail text) + ownership.
+    codings = [c["coding"][0] for c in org["type"]]
+    assert codings[0]["code"] == "prov"
+    assert codings[1] == {
+        "system": FACILITY_TYPE_CS, "code": "primary", "display": "Primary",
+    }
+    assert org["type"][1]["text"] == "Primary Health Center"
+    assert codings[2]["code"] == "public"
+    assert org["identifier"] == [{"system": NHFR, "value": "08/07/1/1/1/0030"}]
+
+    assert location["managingOrganization"] == {
+        "reference": "Organization/org-9c2b58dd-1e99-49b9-970e-eabce1c7dd10"
+    }
+    # Registry codes live on the org; the location keeps place identifiers only.
+    assert {i["system"] for i in location["identifier"]} == {GRID3}
+
+
+def test_paired_org_skips_empty_type_values():
+    (org, _) = run_bake_points_paired([paired_row(level="", ownership="Unknown")])
+    codings = [c["coding"][0] for c in org["type"]]
+    assert [c["code"] for c in codings] == ["prov", "unknown"]
+
+
+def test_unpaired_rows_have_no_managing_organization():
+    (resource,) = run_bake_points([facility_row()])
+    assert "managingOrganization" not in resource

@@ -88,7 +88,7 @@ def build_bundles(
                         "resource": resource,
                         "request": {
                             "method": "PUT",
-                            "url": f"Location/{resource['id']}",
+                            "url": f"{resource['resourceType']}/{resource['id']}",
                         },
                     }
                     for resource in chunk
@@ -98,10 +98,15 @@ def build_bundles(
     return bundles
 
 
-def check_update_create(server: str, token: str | None, client: httpx.Client) -> None:
-    """Verify the store does update-as-create for Location, or refuse to load.
+def check_update_create(
+    server: str,
+    token: str | None,
+    client: httpx.Client,
+    resource_types: tuple[str, ...] = ("Location",),
+) -> None:
+    """Verify the store does update-as-create for every loaded type, or refuse.
 
-    Without it, `PUT Location/<new-id>` 404s (or 400s) on every resource:
+    Without it, `PUT <Type>/<new-id>` 404s (or 400s) on every resource:
     better one clear preflight error naming the store setting than 345
     identical failures.
     """
@@ -119,17 +124,19 @@ def check_update_create(server: str, token: str | None, client: httpx.Client) ->
             f"capability preflight: {url} returned non-JSON: {exc}"
         ) from exc
 
+    supported = set()
     for rest in capability.get("rest", []) or []:
         for resource in (rest or {}).get("resource", []) or []:
-            if isinstance(resource, dict) and resource.get("type") == "Location":
-                if resource.get("updateCreate") is True:
-                    return
-    raise LoadError(
-        "this FHIR store does not advertise update-as-create for Location "
-        "(CapabilityStatement rest.resource.updateCreate). kiln load PUTs "
-        "resources by id, which needs it -- on Google Healthcare API, set "
-        "enableUpdateCreate=true on the FHIR store."
-    )
+            if isinstance(resource, dict) and resource.get("updateCreate") is True:
+                supported.add(resource.get("type"))
+    missing = [t for t in resource_types if t not in supported]
+    if missing:
+        raise LoadError(
+            f"this FHIR store does not advertise update-as-create for "
+            f"{', '.join(missing)} (CapabilityStatement rest.resource.updateCreate). "
+            "kiln load PUTs resources by id, which needs it -- on Google "
+            "Healthcare API, set enableUpdateCreate=true on the FHIR store."
+        )
 
 
 def load(
@@ -153,16 +160,27 @@ def load(
     traceback or a rejected bundle partway through.
     """
     seen_ids: set[str] = set()
+    resource_types: list[str] = []
     for index, resource in enumerate(resources):
         resource_id = resource.get("id") if isinstance(resource, dict) else None
-        if not isinstance(resource_id, str) or not resource_id:
+        resource_type = resource.get("resourceType") if isinstance(resource, dict) else None
+        if (
+            not isinstance(resource_id, str)
+            or not resource_id
+            or not isinstance(resource_type, str)
+            or not resource_type
+        ):
             raise LoadError(
-                f"resource at index {index} is not a valid Location (needs a "
-                f"non-empty string id): {resource!r:.200s}"
+                f"resource at index {index} is not a valid FHIR resource (needs a "
+                f"resourceType and a non-empty string id): {resource!r:.200s}"
             )
-        if resource_id in seen_ids:
-            raise LoadError(f"duplicate resource id {resource_id!r} in load input")
-        seen_ids.add(resource_id)
+        # Ids are only unique per type in FHIR, so key duplicates on both.
+        key = f"{resource_type}/{resource_id}"
+        if key in seen_ids:
+            raise LoadError(f"duplicate resource id {key!r} in load input")
+        seen_ids.add(key)
+        if resource_type not in resource_types:
+            resource_types.append(resource_type)
 
     owns_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT)
@@ -170,7 +188,9 @@ def load(
     headers = _headers(token) | {"Content-Type": "application/fhir+json"}
 
     try:
-        check_update_create(server, token, client)
+        check_update_create(
+            server, token, client, resource_types=tuple(resource_types) or ("Location",)
+        )
         bundles = build_bundles(resources, batch_size=batch_size)
         count = 0
         for index, bundle in enumerate(bundles, start=1):

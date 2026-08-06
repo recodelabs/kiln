@@ -225,6 +225,18 @@ Sites come out `type` = the given ICR location-type code, `physicalType` =
 `si` Site, with `position` from the lat/lon columns — then `kiln load`
 upserts them like any other Location NDJSON.
 
+Pass `--paired-org` for the mCSD facility pairing: each row also emits an
+`Organization` (id `org-<row id>`) — the accountable facility entity — and
+the Location references it via `managingOrganization`. Registry codes move
+to the Organization (`--org-identifier SYSTEM_URI=COLUMN`), and
+`Organization.type` becomes the source of truth for classification via
+`--org-type-coding SYSTEM_URI=CODE_COLUMN[:TEXT_COLUMN]` (cell value
+slugified into the code — `Primary` → `primary` — raw value as display,
+optional text column for the country-specific kind; the generic `prov`
+coding is always added first). `kiln load` handles the mixed NDJSON:
+per-type PUT urls and an update-as-create preflight covering every loaded
+resource type.
+
 By default only the feature level carries geometry — the minted ancestors
 (state, LGA) are boundary-less until an authoritative file for their level
 is loaded. Pass `--dissolve-parents` to give every ancestor a *derived*

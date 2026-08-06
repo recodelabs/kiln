@@ -212,3 +212,68 @@ def test_load_raises_with_the_server_body_after_exhausting_retries():
             None,
             client=client,
         )
+
+
+CAPABILITY_BOTH = {
+    "resourceType": "CapabilityStatement",
+    "rest": [
+        {
+            "mode": "server",
+            "resource": [
+                {"type": "Location", "updateCreate": True},
+                {"type": "Organization", "updateCreate": True},
+            ],
+        }
+    ],
+}
+
+
+def test_build_bundles_uses_each_resources_own_type_in_the_put_url():
+    resources = [
+        {"resourceType": "Organization", "id": "org-1"},
+        {"resourceType": "Location", "id": "loc-1",
+         "managingOrganization": {"reference": "Organization/org-1"}},
+    ]
+    (bundle,) = build_bundles(resources)
+    urls = [entry["request"]["url"] for entry in bundle["entry"]]
+    assert urls == ["Organization/org-1", "Location/loc-1"]
+
+
+def test_check_update_create_requires_every_loaded_resource_type():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=CAPABILITY_OK)  # Location only
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(LoadError, match="Organization"):
+        check_update_create(
+            "https://fhir.test/fhir", None, client,
+            resource_types=("Location", "Organization"),
+        )
+
+
+def test_load_accepts_mixed_resource_types():
+    posted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/metadata"):
+            return httpx.Response(200, json=CAPABILITY_BOTH)
+        import json as json_module
+
+        posted.append(json_module.loads(request.content))
+        return httpx.Response(
+            200, json={"resourceType": "Bundle", "type": "transaction-response"}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    count = load(
+        [
+            {"resourceType": "Location", "id": "loc-1"},
+            {"resourceType": "Organization", "id": "org-1"},
+        ],
+        "https://fhir.test/fhir",
+        None,
+        client=client,
+    )
+    assert count == 2
+    urls = [e["request"]["url"] for e in posted[0]["entry"]]
+    assert set(urls) == {"Organization/org-1", "Location/loc-1"}

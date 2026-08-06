@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 
 from kiln.bake import BakeError, slugify
-from kiln.profile import build_point_location
+from kiln.profile import build_facility_organization, build_point_location
 from kiln.report import Report
 
 # FHIR id: https://hl7.org/fhir/datatypes.html#id
@@ -48,6 +48,19 @@ def parse_identifier_arg(arg: str) -> tuple[str, str]:
     if not sep or not system or not column:
         raise BakeError(f"--identifier must be SYSTEM_URI=COLUMN, got {arg!r}")
     return system, column
+
+
+def parse_org_type_arg(arg: str) -> tuple[str, str, str | None]:
+    """`URI=CODE_COL[:TEXT_COL]` -> (system, code_column, text_column|None)."""
+    system, sep, columns = arg.rpartition("=")
+    if not sep or not system or not columns:
+        raise BakeError(
+            f"--org-type-coding must be SYSTEM_URI=CODE_COLUMN[:TEXT_COLUMN], got {arg!r}"
+        )
+    code_column, _, text_column = columns.partition(":")
+    if not code_column:
+        raise BakeError(f"--org-type-coding {arg!r}: empty code column")
+    return system, code_column, text_column or None
 
 
 def parse_where_arg(arg: str) -> tuple[str, str]:
@@ -141,6 +154,9 @@ def bake_points(
     identifiers: list[tuple[str, str]],
     where: list[tuple[str, str]],
     report: Report,
+    paired_org: bool = False,
+    org_identifiers: list[tuple[str, str]] | None = None,
+    org_type_codings: list[tuple[str, str, str | None]] | None = None,
 ) -> list[dict]:
     """Turn point rows into site Location resources linked into the hierarchy.
 
@@ -148,6 +164,14 @@ def bake_points(
     bad coordinates, malformed id) are reported and cost at most that row
     or its position; duplicate ids are fatal, because two rows claiming
     one resource id would silently overwrite each other on load.
+
+    `paired_org=True` emits the mCSD facility pairing: per row, an
+    Organization (id `org-<row id>`, the accountable entity carrying
+    `org_identifiers` -- the registry codes -- and `org_type_codings`,
+    each a (system, code_column, text_column|None) whose cell value is
+    slugified into the coding code with the raw value as display) followed
+    by the Location, which references it via managingOrganization and
+    keeps only the place identifiers from `identifiers`.
     """
     index = build_admin_index(admin_resources)
     resources: list[dict] = []
@@ -177,22 +201,61 @@ def bake_points(
             )
         seen_ids.add(raw_id)
 
+        org_id = None
+        if paired_org:
+            org_id = f"org-{raw_id}"
+            resources.append(
+                build_facility_organization(
+                    org_id,
+                    name,
+                    identifiers=_row_identifiers(row, org_identifiers or []),
+                    type_concepts=_org_type_concepts(row, org_type_codings or []),
+                )
+            )
+
         resources.append(
             build_point_location(
                 raw_id,
                 name,
                 type_code=type_code,
                 parent_id=resolve_parent(index, parents, row, row_label, report),
-                identifiers=[
-                    (system, value)
-                    for system, column in identifiers
-                    if (value := str(row.get(column) or "").strip())
-                ],
+                identifiers=_row_identifiers(row, identifiers),
                 position=_read_position(row, lat_col, lon_col, row_label, report),
+                managing_org_id=org_id,
             )
         )
 
     return resources
+
+
+def _row_identifiers(row: dict, specs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """(system, value) pairs from the row; empty cells are dropped."""
+    return [
+        (system, value)
+        for system, column in specs
+        if (value := str(row.get(column) or "").strip())
+    ]
+
+
+def _org_type_concepts(
+    row: dict, codings: list[tuple[str, str, str | None]]
+) -> list[tuple[str, str, str, str | None]]:
+    """(system, code, display, text) tuples for Organization.type.
+
+    The cell value is slugified into the code (so "Primary" -> "primary",
+    matching the IG CodeSystems' code style) with the raw value kept as
+    display; the optional text column carries the country-specific kind
+    ("Primary Health Center"). Empty cells contribute nothing.
+    """
+    concepts = []
+    for system, code_column, text_column in codings:
+        raw = str(row.get(code_column) or "").strip()
+        code = slugify(raw)
+        if not code:
+            continue
+        text = str(row.get(text_column) or "").strip() if text_column else ""
+        concepts.append((system, code, raw, text or None))
+    return concepts
 
 
 def _read_position(
