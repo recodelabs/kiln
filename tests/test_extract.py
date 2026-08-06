@@ -1101,3 +1101,25 @@ def test_boundary_summary_line_prints_even_with_zero_boundary_work(capsys):
 
     err = capsys.readouterr().err
     assert "boundaries: 0 cached, 0 fetched, 0 failed" in err
+
+
+def test_resolve_fetches_a_boundary_under_the_hl7_canonical_url():
+    from kiln.profile import HL7_BOUNDARY_EXTENSION_URL
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=GEOJSON)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resource = {
+        "id": "w1",
+        "extension": [
+            {
+                "url": HL7_BOUNDARY_EXTENSION_URL,
+                "valueAttachment": {"url": "https://geo.test/w1.geojson"},
+            }
+        ],
+    }
+    resolve_boundary_urls([resource], Report(), client=client)
+
+    attachment = resource["extension"][0]["valueAttachment"]
+    assert base64.b64decode(attachment["data"]) == GEOJSON

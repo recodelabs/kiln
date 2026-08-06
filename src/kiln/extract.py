@@ -19,7 +19,7 @@ from typing import NamedTuple
 import httpx
 
 from kiln.cache import cache_read, cache_write
-from kiln.profile import BOUNDARY_EXTENSION_URL, GEOJSON_CONTENT_TYPE
+from kiln.profile import BOUNDARY_EXTENSION_URLS, GEOJSON_CONTENT_TYPE
 from kiln.report import Report
 from kiln.shape import as_list
 
@@ -279,7 +279,7 @@ def _collect_boundary_work(resources: list[dict], report: Report) -> list[_Bound
             if not isinstance(extension, dict):
                 report.add("boundary_fetch_failed", location_id, "extension entry is not a dict")
                 continue
-            if extension.get("url") != BOUNDARY_EXTENSION_URL:
+            if extension.get("url") not in BOUNDARY_EXTENSION_URLS:
                 continue
 
             value_attachment = extension.get("valueAttachment")

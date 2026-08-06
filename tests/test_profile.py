@@ -7,6 +7,7 @@ from kiln.profile import (
     DELIVERY_STRATEGY_EXTENSION_URL,
     GEOJSON_CONTENT_TYPE,
     GERS_SYSTEM,
+    HL7_BOUNDARY_EXTENSION_URL,
     ICR_LOCATION_PROFILE_URL,
     LOCATION_TYPE_SYSTEM,
     NATIONAL_ADMIN_CODE_SYSTEM,
@@ -482,3 +483,22 @@ def test_build_location_requires_at_least_one_identifier():
 
     with pytest.raises(ValueError):
         build_location("nga", "Nigeria", identifiers=[])
+
+
+def test_shred_reads_a_boundary_under_the_hl7_canonical_url():
+    resource = {
+        "resourceType": "Location",
+        "id": "w1",
+        "extension": [
+            {
+                "url": HL7_BOUNDARY_EXTENSION_URL,
+                "valueAttachment": {
+                    "contentType": "application/geo+json",
+                    "data": base64.b64encode(WARD_GEOJSON).decode(),
+                },
+            }
+        ],
+    }
+    raw = shred(resource, Report())
+    assert raw.boundary is not None
+    assert raw.boundary.data == WARD_GEOJSON

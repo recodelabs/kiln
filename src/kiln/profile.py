@@ -18,6 +18,12 @@ from kiln.shape import as_list
 BOUNDARY_EXTENSION_URL = (
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"
 )
+HL7_BOUNDARY_EXTENSION_URL = (
+    "http://hl7.org/fhir/StructureDefinition/location-boundary-geojson"
+)
+# Read set: kiln writes the ICR URL but reads both, so a later IG switch to
+# the HL7 canonical strands no data (spec 2026-08-05, extension-URL policy).
+BOUNDARY_EXTENSION_URLS = (BOUNDARY_EXTENSION_URL, HL7_BOUNDARY_EXTENSION_URL)
 OVERLAYS_EXTENSION_URL = "https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit"
 SETTLEMENT_TYPE_EXTENSION_URL = (
     "https://icr.healthcampaigns.org/StructureDefinition/settlement-type"
@@ -232,7 +238,7 @@ def shred(resource: dict, report: Report) -> RawLocation | None:
             report.add("malformed_field", location_id, "extension entry is not a dict")
             continue
         url = extension.get("url")
-        if url == BOUNDARY_EXTENSION_URL and raw.boundary is None:
+        if url in BOUNDARY_EXTENSION_URLS and raw.boundary is None:
             raw.boundary = _read_boundary(extension, location_id, report)
         elif url == OVERLAYS_EXTENSION_URL:
             value_reference = extension.get("valueReference")

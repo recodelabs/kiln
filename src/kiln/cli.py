@@ -23,7 +23,7 @@ from kiln.extract import (
 )
 from kiln.frame import build_frame
 from kiln.inspect import format_summary, summarize
-from kiln.profile import BOUNDARY_EXTENSION_URL, shred
+from kiln.profile import BOUNDARY_EXTENSION_URLS, shred
 from kiln.report import Report, check_duplicate_pcodes, check_points_within_parents
 from kiln.shape import as_list
 from kiln.write import (
@@ -41,7 +41,8 @@ def _note_unresolved_boundary_urls(resources: list[dict], report: Report) -> Non
     """transform is offline; a url-only boundary cannot be fetched here."""
     for resource in resources:
         for extension in as_list(resource.get("extension")):
-            if not isinstance(extension, dict) or extension.get("url") != BOUNDARY_EXTENSION_URL:
+            ext_url = extension.get("url") if isinstance(extension, dict) else None
+            if not isinstance(extension, dict) or ext_url not in BOUNDARY_EXTENSION_URLS:
                 continue
             attachment = extension.get("valueAttachment") or {}
             if not isinstance(attachment, dict):
