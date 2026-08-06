@@ -18,6 +18,7 @@ UNKNOWN_COUNTRY = "unknown"
 STRING_COLUMNS = {
     "id", "name", "status", "loc_type", "physical_type", "pcode", "gers_id",
     "parent_id", "path", "country", "settlement_type", "delivery_strategy",
+    "facility_level", "ownership",
     "geom_type", "tier", "last_updated",
 }
 STRING_COLUMNS |= {f"admin{i}_name" for i in range(ADMIN_COLUMNS)}
@@ -98,6 +99,8 @@ def build_frame(
             "ancestor_ids": info.ancestor_ids,
             "country": country,
             "settlement_type": location.settlement_type,
+            "facility_level": location.facility_level,
+            "ownership": location.ownership,
             "delivery_strategy": location.delivery_strategy,
             "overlays_admin_unit_ids": location.overlays_admin_unit_ids,
             "geom_type": geometry.geom_type,

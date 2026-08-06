@@ -502,3 +502,27 @@ def test_shred_reads_a_boundary_under_the_hl7_canonical_url():
     raw = shred(resource, Report())
     assert raw.boundary is not None
     assert raw.boundary.data == WARD_GEOJSON
+
+
+def test_shred_extracts_facility_level_and_ownership_from_extra_type_codings():
+    from kiln.profile import FACILITY_TYPE_SYSTEM, OWNERSHIP_SYSTEM
+
+    resource = {
+        "resourceType": "Location",
+        "id": "f1",
+        "type": [
+            {"coding": [{"system": LOCATION_TYPE_SYSTEM, "code": "facility"}]},
+            {"coding": [{"system": FACILITY_TYPE_SYSTEM, "code": "primary"}]},
+            {"coding": [{"system": OWNERSHIP_SYSTEM, "code": "public"}]},
+        ],
+    }
+    raw = shred(resource, Report())
+    assert raw.loc_type == "facility"
+    assert raw.facility_level == "primary"
+    assert raw.ownership == "public"
+
+
+def test_shred_without_classification_codings_leaves_fields_none():
+    raw = shred({"resourceType": "Location", "id": "w1"}, Report())
+    assert raw.facility_level is None
+    assert raw.ownership is None

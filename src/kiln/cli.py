@@ -269,6 +269,7 @@ def cmd_bake_points(args: argparse.Namespace) -> int:
             paired_org=args.paired_org,
             org_identifiers=[parse_identifier_arg(i) for i in args.org_identifier],
             org_type_codings=[parse_org_type_arg(i) for i in args.org_type_coding],
+            type_codings=[parse_org_type_arg(i) for i in args.type_coding],
         )
     except BakeError as exc:
         print(f"kiln bake-points: {exc}", file=sys.stderr)
@@ -515,6 +516,17 @@ def build_parser() -> argparse.ArgumentParser:
             "repeatable -- cell value slugified into the code (raw value as "
             "display), optional text column for the country-specific kind; "
             "'prov' is always added first"
+        ),
+    )
+    points_cmd.add_argument(
+        "--type-coding",
+        dest="type_coding",
+        action="append",
+        default=[],
+        help=(
+            "SYSTEM_URI=CODE_COLUMN[:TEXT_COLUMN] appended to Location.type "
+            "after the functional code -- the mCSD-sanctioned copy of the "
+            "classification axes for Location-only consumers"
         ),
     )
     points_cmd.add_argument("--out", required=True, help="Output NDJSON file")

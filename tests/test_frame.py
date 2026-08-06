@@ -82,6 +82,7 @@ def test_frame_has_the_full_expected_column_set():
         "id", "name", "status", "loc_type", "physical_type", "pcode", "gers_id",
         "identifiers", "parent_id", "depth", "admin_level", "path", "ancestor_ids",
         "country", "settlement_type", "delivery_strategy", "overlays_admin_unit_ids",
+        "facility_level", "ownership",
         "geom_type", "tier", "lon", "lat", "last_updated", "geometry",
     }
     expected |= {f"admin{i}_name" for i in range(5)}
