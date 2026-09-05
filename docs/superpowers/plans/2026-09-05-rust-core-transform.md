@@ -1779,7 +1779,7 @@ git commit -m "Resolve the Location hierarchy on the pass-one index"
 **Files:**
 - Modify: `src/index/hilbert.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -1810,7 +1810,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement hilbert_key**
+- [x] **Step 2: Implement hilbert_key**
 
 ```rust
 //! Hilbert curve key for spatial clustering of rows within a partition.
@@ -1850,12 +1850,12 @@ pub fn hilbert_key(point: [f64; 2], extent: [f64; 4]) -> u64 {
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test index::hilbert`
 Expected: 3 passed. If `corners_map_to_curve_ends` fails on the `last` corner, the curve end for this xy2d variant is `(n-1, 0)`; that is what the test uses. If it still fails, print the value and confirm it is one of the two corner keys (`0` or `n*n-1`), then fix the test to the corner this implementation ends on.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/index/hilbert.rs
