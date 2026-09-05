@@ -10,6 +10,7 @@ use crate::error::{KilnError, Result};
 use crate::fhir::ndjson::LineAccess;
 use crate::fhir::Location;
 use crate::geometry::{self, GeomKind};
+use crate::index::hierarchy::Hierarchy;
 use crate::index::partition::{segment, Claims, PartitionKey};
 use crate::index::{Index, IndexRecord};
 use crate::report::Report;
@@ -21,7 +22,9 @@ const STAGING_DIR: &str = ".locations.tmp";
 const BACKUP_DIR: &str = ".locations.bak";
 const MIN_PARTITION_ROWS: usize = 100;
 const PARENT_CACHE_MAX: usize = 256;
+const ROW_VANISHED_DETAIL: &str = "row indexed in pass one could not be rebuilt in pass two";
 
+#[derive(Debug)]
 pub struct WrittenPartition {
     pub path: PathBuf,
     /// `key=value/key=value` as written under the dataset directory.
@@ -51,32 +54,45 @@ impl ParentCache {
         idx: u32,
         records: &[IndexRecord],
         lines: &mut LineAccess,
-    ) -> Result<Option<geo::Geometry<f64>>> {
-        if let Some(cached) = self.polygons.get(&idx) {
-            return Ok(cached.clone());
+    ) -> Result<Option<&geo::Geometry<f64>>> {
+        if !self.polygons.contains_key(&idx) {
+            // Eviction is wholesale rather than LRU: access is spatially
+            // clustered (an admin ancestor is shared by all its children,
+            // visited consecutively in Hilbert order), so by the time the
+            // cache fills up the entries most likely to be reused soon are
+            // already the most recently inserted ones -- a full clear
+            // rarely throws away something about to be needed again. The
+            // pathological case is a single partition whose rows cycle
+            // through more than PARENT_CACHE_MAX distinct polygon parents,
+            // which would thrash (repeatedly re-reading and re-parsing
+            // parents); that trades some CPU for bounded memory.
+            if self.polygons.len() >= PARENT_CACHE_MAX {
+                self.polygons.clear();
+            }
+            let mut silent = Report::default();
+            let geom = load_location(lines, &records[idx as usize])?
+                .and_then(|loc| geometry::build(&loc, &mut silent))
+                .filter(|g| g.kind == GeomKind::Polygon)
+                .map(|g| g.geometry);
+            self.polygons.insert(idx, geom);
         }
-        if self.polygons.len() >= PARENT_CACHE_MAX {
-            self.polygons.clear();
-        }
-        let mut silent = Report::default();
-        let geom = load_location(lines, &records[idx as usize])?
-            .and_then(|loc| geometry::build(&loc, &mut silent))
-            .filter(|g| g.kind == GeomKind::Polygon)
-            .map(|g| g.geometry);
-        self.polygons.insert(idx, geom.clone());
-        Ok(geom)
+        Ok(self.polygons.get(&idx).unwrap().as_ref())
     }
 }
 
 /// The nearest ancestor (walking parent links) that has a polygon geometry.
-fn nearest_polygon_ancestor(index: &Index, i: usize) -> Option<u32> {
-    let mut cur = index.hierarchy.get(i)?.parent;
+fn nearest_polygon_ancestor(
+    hierarchy: &Hierarchy,
+    records: &[IndexRecord],
+    i: usize,
+) -> Option<u32> {
+    let mut cur = hierarchy.get(i)?.parent;
     while let Some(p) = cur {
         let pi = p.index();
-        if index.records[pi].geometry.map(|g| g.kind) == Some(GeomKind::Polygon) {
+        if records[pi].geometry.map(|g| g.kind) == Some(GeomKind::Polygon) {
             return Some(pi as u32);
         }
-        cur = index.hierarchy.get(pi)?.parent;
+        cur = hierarchy.get(pi)?.parent;
     }
     None
 }
@@ -132,14 +148,18 @@ pub fn write_dataset(
         }
     };
     swap_in(&dataset, &backup, &staging)?;
+    // Durability: fsync the directory whose entry (the `locations` rename)
+    // just changed, so that change survives a crash right after this
+    // returns. Not every platform/filesystem supports fsync on a
+    // directory; that is a best-effort improvement, not something worth
+    // failing an otherwise-successful write over.
+    if let Ok(dir) = std::fs::File::open(out_dir) {
+        let _ = dir.sync_all();
+    }
     Ok(written
         .into_iter()
         .map(|w| WrittenPartition {
-            path: dataset.join(
-                w.path
-                    .strip_prefix(&staging)
-                    .expect("written under staging"),
-            ),
+            path: dataset.join(&w.partition).join("part-0.parquet"),
             ..w
         })
         .collect())
@@ -152,16 +172,31 @@ fn write_partitions(
     keys: &[PartitionKey],
     row_group_size: usize,
 ) -> Result<Vec<WrittenPartition>> {
+    let Index {
+        records,
+        hierarchy,
+        order,
+        report,
+        ..
+    } = index;
+    let records: &[IndexRecord] = records;
+    let hierarchy: &Hierarchy = hierarchy;
+    let order: &[u32] = order;
+
     // Group records by their partition values, preserving the index's
     // (country, geom_type, Hilbert) order within each group so every
     // partition stays spatially clustered whatever keys were chosen.
     let mut groups: Vec<(Vec<String>, Vec<u32>)> = Vec::new();
-    for &i in &index.order {
-        let rec = &index.records[i as usize];
+    let mut group_index: HashMap<Vec<String>, usize> = HashMap::new();
+    for &i in order {
+        let rec = &records[i as usize];
         let values: Vec<String> = keys.iter().map(|k| k.value(rec).to_string()).collect();
-        match groups.iter_mut().find(|(v, _)| *v == values) {
-            Some((_, idxs)) => idxs.push(i),
-            None => groups.push((values, vec![i])),
+        match group_index.get(&values) {
+            Some(&gi) => groups[gi].1.push(i),
+            None => {
+                group_index.insert(values.clone(), groups.len());
+                groups.push((values, vec![i]));
+            }
         }
     }
 
@@ -172,19 +207,13 @@ fn write_partitions(
     // One claims table per (parent path, key): a segment only needs to be
     // unique among siblings in the same directory.
     let mut claims: HashMap<(Vec<String>, &'static str), Claims> = HashMap::new();
-    let mut report = Report::default();
     let mut written = Vec::new();
 
     for (values, idxs) in &groups {
         let mut segments: Vec<String> = Vec::new();
         for (key, value) in keys.iter().zip(values) {
             let ctx = (segments.clone(), key.name());
-            let seg = segment(
-                key.name(),
-                value,
-                claims.entry(ctx).or_default(),
-                &mut report,
-            );
+            let seg = segment(key.name(), value, claims.entry(ctx).or_default(), report);
             segments.push(format!("{}={seg}", key.name()));
         }
         let partition = segments.join("/");
@@ -208,20 +237,23 @@ fn write_partitions(
 
         for &i in idxs {
             let i = i as usize;
-            let rec = &index.records[i];
+            let rec = &records[i];
             let Some(loc) = load_location(&mut lines, rec)? else {
+                report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
                 continue;
             };
             let mut silent = Report::default();
             let Some(geom) = geometry::build(&loc, &mut silent) else {
+                report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
                 continue;
             };
-            let Some(info) = index.hierarchy.get(i) else {
+            let Some(info) = hierarchy.get(i) else {
+                report.add("row_vanished", &rec.id, ROW_VANISHED_DETAIL);
                 continue;
             };
 
-            if let Some(parent_idx) = nearest_polygon_ancestor(index, i) {
-                if let Some(parent) = parent_cache.get(parent_idx, &index.records, &mut lines)? {
+            if let Some(parent_idx) = nearest_polygon_ancestor(hierarchy, records, i) {
+                if let Some(parent) = parent_cache.get(parent_idx, records, &mut lines)? {
                     let pt = geo::Point::new(geom.lon, geom.lat);
                     if !parent.intersects(&pt) {
                         report.add(
@@ -247,37 +279,37 @@ fn write_partitions(
             }
 
             let row = OutputRow {
-                id: loc.id.clone(),
+                id: loc.id,
                 version_id: loc.version_id.clone(),
                 last_updated: loc.last_updated.clone(),
-                name: loc.name.clone(),
-                alias: loc.alias.clone(),
-                status: loc.status.clone(),
-                description: loc.description.clone(),
-                type_code: loc.type_code.clone(),
-                physical_type: loc.physical_type.clone(),
-                part_of: loc.part_of.clone(),
-                managing_organization: loc.managing_organization.clone(),
+                name: loc.name,
+                alias: loc.alias,
+                status: loc.status,
+                description: loc.description,
+                type_code: loc.type_code,
+                physical_type: loc.physical_type,
+                part_of: loc.part_of,
+                managing_organization: loc.managing_organization,
                 identifier: loc
                     .identifier
-                    .iter()
-                    .map(|ident| (ident.system.clone(), ident.value.clone()))
+                    .into_iter()
+                    .map(|ident| (ident.system, ident.value))
                     .collect(),
                 position: loc.position,
-                pcode: loc.pcode.clone(),
-                gers_id: loc.gers_id.clone(),
-                settlement_type: loc.settlement_type.clone(),
-                delivery_strategy: loc.delivery_strategy.clone(),
-                facility_level: loc.facility_level.clone(),
-                ownership: loc.ownership.clone(),
+                pcode: loc.pcode,
+                gers_id: loc.gers_id,
+                settlement_type: loc.settlement_type,
+                delivery_strategy: loc.delivery_strategy,
+                facility_level: loc.facility_level,
+                ownership: loc.ownership,
                 depth: i32::from(info.depth),
                 admin_level: info.admin_level.map(i32::from),
                 tier: rec.tier.clone(),
-                path: index.hierarchy.path(&index.records, i),
-                ancestor_ids: index.hierarchy.ancestor_ids(&index.records, i),
-                admin_names: index.hierarchy.admin_names(&index.records, i),
-                admin_codes: index.hierarchy.admin_codes(&index.records, i),
-                overlays_admin_unit_ids: loc.overlays_admin_unit_ids.clone(),
+                path: hierarchy.path(records, i),
+                ancestor_ids: hierarchy.ancestor_ids(records, i),
+                admin_names: hierarchy.admin_names(records, i),
+                admin_codes: hierarchy.admin_codes(records, i),
+                overlays_admin_unit_ids: loc.overlays_admin_unit_ids,
                 country: rec.country.clone(),
                 geom_type: geom.kind.as_str().to_string(),
                 lon: geom.lon,
@@ -301,11 +333,6 @@ fn write_partitions(
         });
     }
 
-    for issue in report.issues {
-        index
-            .report
-            .add(&issue.kind, &issue.location_id, &issue.detail);
-    }
     Ok(written)
 }
 
@@ -314,10 +341,29 @@ mod tests {
     use super::*;
     use crate::index::build_index;
     use crate::index::partition::parse_keys;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     fn fixture() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot/locations.ndjson")
+    }
+
+    /// Recursively snapshot every file under `dir` as `(path, bytes)`, for
+    /// byte-identity comparisons across a failed rerun.
+    fn snapshot_files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        if !dir.is_dir() {
+            return out;
+        }
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(snapshot_files(&path));
+            } else {
+                out.insert(path.clone(), std::fs::read(&path).unwrap());
+            }
+        }
+        out
     }
 
     #[test]
@@ -422,6 +468,108 @@ mod tests {
         assert!(out
             .path()
             .join("locations/country=NG/geom_type=polygon/part-0.parquet")
+            .exists());
+    }
+
+    #[test]
+    fn mid_write_failure_leaves_the_live_dataset_untouched() {
+        let out = tempfile::tempdir().unwrap();
+        let mut index = build_index(&fixture(), None).unwrap();
+        let keys = parse_keys("country,geom_type").unwrap();
+        write_dataset(&fixture(), &mut index, out.path(), &keys, 3).unwrap();
+        let before = snapshot_files(&out.path().join("locations"));
+        assert!(!before.is_empty());
+
+        // A record whose recorded offset is now nonsense (as if the ndjson
+        // had shrunk out from under it): the seek succeeds but the read
+        // fails, so the whole write must abort partway through.
+        let mut broken = build_index(&fixture(), None).unwrap();
+        let last = *broken.order.last().unwrap();
+        broken.records[last as usize].offset = 1 << 40;
+        let err = write_dataset(&fixture(), &mut broken, out.path(), &keys, 3);
+        assert!(err.is_err(), "{err:?}");
+
+        assert!(!out.path().join(".locations.tmp").exists());
+        assert!(!out.path().join(".locations.bak").exists());
+        let after = snapshot_files(&out.path().join("locations"));
+        assert_eq!(
+            before, after,
+            "live dataset must be byte-identical after a failed rerun"
+        );
+    }
+
+    #[test]
+    fn a_rerun_with_different_keys_leaves_only_its_own_files() {
+        let out = tempfile::tempdir().unwrap();
+        let mut index = build_index(&fixture(), None).unwrap();
+        let keys = parse_keys("country,geom_type").unwrap();
+        write_dataset(&fixture(), &mut index, out.path(), &keys, 3).unwrap();
+
+        let mut index2 = build_index(&fixture(), None).unwrap();
+        let tier_keys = parse_keys("tier").unwrap();
+        write_dataset(&fixture(), &mut index2, out.path(), &tier_keys, 3).unwrap();
+
+        let dataset = out.path().join("locations");
+        let mut saw_any = false;
+        for entry in std::fs::read_dir(&dataset).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            saw_any = true;
+            assert!(
+                name.starts_with("tier="),
+                "leftover from the previous partitioning scheme: {name}"
+            );
+        }
+        assert!(saw_any);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_dataset_dir_is_refused() {
+        use std::os::unix::fs::symlink;
+        let out = tempfile::tempdir().unwrap();
+        let real = out.path().join("real-locations");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, out.path().join("locations")).unwrap();
+
+        let mut index = build_index(&fixture(), None).unwrap();
+        let keys = parse_keys("country,geom_type").unwrap();
+        let err = write_dataset(&fixture(), &mut index, out.path(), &keys, 3).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
+    }
+
+    #[test]
+    fn stale_staging_is_discarded() {
+        let out = tempfile::tempdir().unwrap();
+        let staging = out.path().join(".locations.tmp");
+        std::fs::create_dir_all(staging.join("country=STALE")).unwrap();
+        std::fs::write(staging.join("country=STALE/junk"), b"stale").unwrap();
+
+        let mut index = build_index(&fixture(), None).unwrap();
+        let keys = parse_keys("country,geom_type").unwrap();
+        write_dataset(&fixture(), &mut index, out.path(), &keys, 3).unwrap();
+
+        assert!(!out.path().join("locations/country=STALE").exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn backup_alongside_a_live_dataset_is_removed() {
+        let out = tempfile::tempdir().unwrap();
+        let dataset = out.path().join("locations");
+        std::fs::create_dir_all(dataset.join("country=OLD")).unwrap();
+        std::fs::write(dataset.join("country=OLD/marker"), b"live").unwrap();
+        let backup = out.path().join(".locations.bak");
+        std::fs::create_dir_all(backup.join("country=OLDER")).unwrap();
+        std::fs::write(backup.join("country=OLDER/marker"), b"backup").unwrap();
+
+        let mut index = build_index(&fixture(), None).unwrap();
+        let keys = parse_keys("country,geom_type").unwrap();
+        write_dataset(&fixture(), &mut index, out.path(), &keys, 3).unwrap();
+
+        assert!(!backup.exists());
+        assert!(!dataset.join("country=OLD").exists());
+        assert!(dataset
+            .join("country=NG/geom_type=polygon/part-0.parquet")
             .exists());
     }
 }

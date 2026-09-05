@@ -23,6 +23,11 @@ pub struct PartitionStats {
 
 pub struct PartitionWriter {
     writer: ArrowWriter<File>,
+    /// A clone of the writer's file descriptor, kept so `finish` can
+    /// `sync_all` after `ArrowWriter::close` -- `close` consumes the writer
+    /// (and the `File` inside it), so the only way to fsync afterwards is to
+    /// have held a separate handle to the same file all along.
+    file: File,
     path: PathBuf,
     bbox: [f64; 4],
     rows: usize,
@@ -35,6 +40,7 @@ impl PartitionWriter {
             std::fs::create_dir_all(parent).map_err(|e| KilnError::io(parent, e))?;
         }
         let file = File::create(path).map_err(|e| KilnError::io(path, e))?;
+        let file_for_sync = file.try_clone().map_err(|e| KilnError::io(path, e))?;
         let props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(
                 // Write-once, read-many output: worth spending more CPU than
@@ -50,6 +56,7 @@ impl PartitionWriter {
             .map_err(|e| KilnError::parquet_at(path, e))?;
         Ok(Self {
             writer,
+            file: file_for_sync,
             path: path.to_path_buf(),
             bbox: [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
             rows: 0,
@@ -135,6 +142,12 @@ impl PartitionWriter {
         self.writer
             .close()
             .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
+        // Durability: the atomic dataset swap makes this file visible to
+        // readers as soon as the directory rename lands, so its data and
+        // metadata must already be on disk before that happens.
+        self.file
+            .sync_all()
+            .map_err(|e| KilnError::io(self.path.clone(), e))?;
         Ok(PartitionStats {
             rows: self.rows,
             row_groups: self.row_groups,
