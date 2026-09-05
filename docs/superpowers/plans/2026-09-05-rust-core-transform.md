@@ -1490,7 +1490,7 @@ git commit -m "Classify, validate and summarise Location geometry without repair
 - Create: `src/index/mod.rs`, `src/index/hierarchy.rs`
 - Modify: `src/main.rs` (add `mod index;`)
 
-- [ ] **Step 1: Create src/index/mod.rs with the IndexRecord type**
+- [x] **Step 1: Create src/index/mod.rs with the IndexRecord type**
 
 ```rust
 pub mod hierarchy;
@@ -1523,7 +1523,7 @@ pub use hierarchy::{resolve_hierarchy, HierarchyInfo, ADMIN_COLUMNS};
 
 (`hilbert` and `partition` come in Tasks 7 and 8; create empty files `src/index/hilbert.rs` and `src/index/partition.rs` now so the crate compiles.) Add `mod index;` to `src/main.rs`.
 
-- [ ] **Step 2: Write the failing tests in src/index/hierarchy.rs**
+- [x] **Step 2: Write the failing tests in src/index/hierarchy.rs**
 
 ```rust
 #[cfg(test)]
@@ -1609,12 +1609,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test index::hierarchy 2>&1 | grep -E "^error" | head -3`
 Expected: compile errors.
 
-- [ ] **Step 4: Implement resolve_hierarchy**
+- [x] **Step 4: Implement resolve_hierarchy**
 
 > Superseded during execution: the shipped `src/index/hierarchy.rs` is index-based. `resolve_hierarchy` returns a `Hierarchy { infos: Vec<Option<HierarchyInfo>> }` parallel to the records slice, where `HierarchyInfo` (~32 bytes) holds `depth`, `admin_count`, `admin_level`, `parent: Option<u32>` and `admin: [Option<u32>; 5]` as indices into records; `path`, `ancestor_ids`, `admin_names`, `admin_codes` and `country` are derived on demand by methods on `Hierarchy`. There is no chain cache; resolution is an O(n) memoised walk over parent indices. Duplicate ids are reported as `duplicate_id` (first occurrence wins). Consequence for Tasks 9 and 12: the `Index` must keep ALL parsed records as the addressing space (`records`), the parallel `hierarchy`, and a separate `order: Vec<u32>` of the retained record indices sorted by partition then Hilbert key. Pass two iterates `order`. The listings below are adjusted in the task prompts; treat the shipped files as the reference.
 
@@ -1760,12 +1760,12 @@ pub fn resolve_hierarchy(records: &[IndexRecord], report: &mut Report) -> HashMa
 
 Depth semantics: Python's `MAX_DEPTH = 12` allows a chain of 12 nodes (`len(walked) > MAX_DEPTH` raises). The test above expects `n12` present and `n13` absent, meaning chains of 13 nodes are allowed. Check against the Python test `test_hierarchy.py` and make the Rust match the Python exactly: if the Python drops `n12`, change `MAX_DEPTH + 1` to `MAX_DEPTH` in both places and fix the test expectations (`n11` present, `n12` absent, 8 too_deep).
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test index::hierarchy`
 Expected: 4 passed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/index src/main.rs
