@@ -24,8 +24,16 @@ pub struct Report {
 
 impl Report {
     pub fn add(&mut self, kind: &str, location_id: &str, detail: &str) {
-        *self.counts.entry(kind.to_string()).or_default() += 1;
-        let retained = self.retained.entry(kind.to_string()).or_default();
+        match self.counts.get_mut(kind) {
+            Some(n) => *n += 1,
+            None => {
+                self.counts.insert(kind.to_string(), 1);
+            }
+        }
+        if !self.retained.contains_key(kind) {
+            self.retained.insert(kind.to_string(), 0);
+        }
+        let retained = self.retained.get_mut(kind).unwrap();
         if *retained < MAX_RETAINED_ISSUES_PER_KIND {
             self.issues.push(Issue {
                 kind: kind.to_string(),
@@ -109,6 +117,18 @@ mod tests {
         report.add("orphan", "c", "");
         assert_eq!(report.summary(), "Issues found:\n  cycle: 1\n  orphan: 2");
         assert_eq!(Report::default().summary(), "No issues found.");
+    }
+
+    #[test]
+    fn summary_reports_truncation() {
+        let mut report = Report::default();
+        for i in 0..(MAX_RETAINED_ISSUES_PER_KIND + 3) {
+            report.add("orphan", &format!("loc-{i}"), "dangling");
+        }
+        assert_eq!(
+            report.summary(),
+            "Issues found:\n  orphan: 1003\nissues list capped at 1000 per kind (counts above are exact); omitted from the list: orphan (+3 more)"
+        );
     }
 
     #[test]
