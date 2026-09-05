@@ -7,6 +7,9 @@ pub const DEFAULT_PARTITION_BY: &str = "country,geom_type";
 pub const DEFAULT_CONCURRENCY: usize = 8;
 pub const DEFAULT_RETRIES: usize = 3;
 pub const DEFAULT_MAX_CONSECUTIVE_FAILURES: usize = 50;
+/// Generous by design: a large boundary over a slow link can legitimately
+/// take minutes, and reqwest's blocking client has no per-read timeout.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -92,6 +95,9 @@ pub struct ExtractArgs {
     /// Boundary cache directory (default: SNAPSHOT/boundaries)
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
 }
 
 #[derive(clap::Args, Debug, Clone)]

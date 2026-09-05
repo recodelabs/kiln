@@ -17,9 +17,7 @@ fn main() {
     let result: error::Result<()> = match cli.command {
         cli::Command::Transform(args) => transform::run_transform(&args),
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
-        cli::Command::Extract(_) => Err(error::KilnError::Usage(
-            "extract: not implemented yet".into(),
-        )),
+        cli::Command::Extract(args) => extract::run_extract(&args),
         cli::Command::Run(args) => {
             let _ = args.transform_args();
             Err(error::KilnError::Usage("run: not implemented yet".into()))

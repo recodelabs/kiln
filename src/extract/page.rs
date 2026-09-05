@@ -173,7 +173,6 @@ pub fn page_locations(
         }
     }
     out.flush().map_err(|e| KilnError::io(incoming, e))?;
-    eprintln!("paged {} resources over {pages} page(s)", notes.len());
     Ok(PageResult { notes, pages })
 }
 
