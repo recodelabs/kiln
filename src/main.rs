@@ -5,6 +5,7 @@ mod geometry;
 mod index;
 mod inspect;
 mod report;
+mod snapshot;
 mod transform;
 mod write;
 
