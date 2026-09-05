@@ -5,14 +5,12 @@ use wkb::Endianness;
 
 /// Encodes a `geo` geometry to little-endian WKB.
 ///
-/// The `wkb` crate 0.9 mis-encodes `geo::Rect` (it omits the ring's point
-/// count), so callers must never pass a `Rect`; convert with
-/// `rect.to_polygon()` first.
+/// The `wkb` crate 0.9 mis-encodes `geo::Rect` directly (it omits the ring's
+/// point count), so a `Rect` is converted to a `Polygon` before encoding.
 pub fn to_wkb(geom: &geo::Geometry<f64>) -> Vec<u8> {
-    debug_assert!(
-        !matches!(geom, geo::Geometry::Rect(_)),
-        "convert Rect to Polygon before encoding"
-    );
+    if let geo::Geometry::Rect(r) = geom {
+        return to_wkb(&geo::Geometry::Polygon(r.to_polygon()));
+    }
     let mut out = Vec::new();
     let options = WriteOptions {
         endianness: Endianness::LittleEndian,
