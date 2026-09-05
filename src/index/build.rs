@@ -7,13 +7,20 @@ use std::path::Path;
 
 use crate::fhir::ndjson::NdjsonReader;
 use crate::fhir::{Boundary, Location};
-use crate::geometry;
+use crate::geometry::{self, GeometrySummary};
 use crate::index::hierarchy::{resolve_hierarchy, Hierarchy};
 use crate::index::hilbert::hilbert_key;
 use crate::index::IndexRecord;
 use crate::report::Report;
 
 pub const UNKNOWN_COUNTRY: &str = "unknown";
+
+/// A fixed WGS84 extent for the Hilbert key, rather than the dataset's own
+/// bbox: keys stay deterministic across snapshots and are not skewed by a
+/// single outlier point far from the rest of the data. At ORDER 16 this
+/// gives roughly 5.5 km cells at the equator -- ample for clustering rows
+/// within a partition.
+pub const HILBERT_EXTENT: [f64; 4] = [-180.0, -90.0, 180.0, 90.0];
 
 pub struct Index {
     /// Every parsed resource, in file order. The hierarchy is indexed by position here.
@@ -32,6 +39,9 @@ pub fn build_index(ndjson: &Path, country_override: Option<&str>) -> crate::erro
     let mut read = 0usize;
 
     for line in NdjsonReader::open(ndjson)? {
+        // Only I/O and encoding errors abort the run here; a line that
+        // fails to parse as JSON, or as a Location, is reported below and
+        // skipped so one bad line does not sink the whole snapshot.
         let line = line?;
         read += 1;
         let value: serde_json::Value = match serde_json::from_str(&line.text) {
@@ -74,79 +84,85 @@ pub fn build_index(ndjson: &Path, country_override: Option<&str>) -> crate::erro
     // a geometry-less district is still somebody's parent.
     let hierarchy = resolve_hierarchy(&records, &mut report);
 
-    let retained: Vec<u32> = (0..records.len())
-        .filter(|&i| hierarchy.get(i).is_some() && records[i].geometry.is_some())
-        .map(|i| i as u32)
+    let retained: Vec<(u32, GeometrySummary)> = (0..records.len())
+        .filter_map(|i| {
+            let r = &records[i];
+            match (hierarchy.get(i), r.geometry) {
+                (Some(_), Some(geom)) => Some((i as u32, geom)),
+                _ => None,
+            }
+        })
         .collect();
 
-    let mut extent = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
-    for &i in &retained {
-        let b = records[i as usize].geometry.unwrap().bbox;
-        extent = [
-            extent[0].min(b[0]),
-            extent[1].min(b[1]),
-            extent[2].max(b[2]),
-            extent[3].max(b[3]),
-        ];
-    }
-
-    let mut by_pcode: HashMap<String, Vec<String>> = HashMap::new();
-    for &i in &retained {
+    for &(i, geom) in &retained {
         let i = i as usize;
-        let country = match (country_override, hierarchy.country(&records, i)) {
-            (Some(c), _) => c.to_string(),
-            (None, Some(c)) => c,
-            (None, None) => {
-                report.add(
-                    "no_country",
-                    &records[i].id,
-                    "no admin-unit ancestor carries a pcode; filed under 'unknown'",
-                );
-                UNKNOWN_COUNTRY.to_string()
-            }
+        let country = match country_override {
+            Some(c) => c.to_string(),
+            None => match hierarchy.country(&records, i) {
+                Some(c) => c,
+                None => {
+                    report.add(
+                        "no_country",
+                        &records[i].id,
+                        "no admin-unit ancestor carries a pcode; filed under 'unknown'",
+                    );
+                    UNKNOWN_COUNTRY.to_string()
+                }
+            },
         };
         let tier = match hierarchy.get(i).and_then(|info| info.admin_level) {
             Some(level) => level.to_string(),
             None => "site".to_string(),
         };
-        let b = records[i].geometry.unwrap().bbox;
-        let hilbert = hilbert_key([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], extent);
+        let b = geom.bbox;
+        let hilbert = hilbert_key([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], HILBERT_EXTENT);
         let rec = &mut records[i];
         rec.country = country;
         rec.tier = tier;
         rec.hilbert = hilbert;
-        if let Some(p) = &rec.pcode {
-            by_pcode.entry(p.clone()).or_default().push(rec.id.clone());
-        }
     }
 
-    let mut dups: Vec<(&String, &Vec<String>)> =
-        by_pcode.iter().filter(|(_, ids)| ids.len() > 1).collect();
-    dups.sort();
-    for (pcode, ids) in dups {
-        let mut ids = ids.clone();
-        ids.sort();
+    // Duplicate-pcode detection is scoped to retained rows only: a dropped
+    // record (no geometry, or trimmed by the hierarchy resolver) never
+    // reaches the output, so it should never manufacture a collision with
+    // one that does.
+    let mut by_pcode: HashMap<&str, Vec<u32>> = HashMap::new();
+    for &(i, _) in &retained {
+        if let Some(p) = &records[i as usize].pcode {
+            by_pcode.entry(p.as_str()).or_default().push(i);
+        }
+    }
+    let mut dup_pcodes: Vec<&str> = by_pcode
+        .iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(&k, _)| k)
+        .collect();
+    dup_pcodes.sort();
+    for pcode in dup_pcodes {
+        let ids = &by_pcode[pcode];
+        let mut names: Vec<&str> = ids
+            .iter()
+            .map(|&i| records[i as usize].id.as_str())
+            .collect();
+        names.sort();
         report.add(
             "duplicate_pcode",
-            &ids.join(", "),
-            &format!("pcode {pcode} claimed by {} Locations", ids.len()),
+            &names.join(", "),
+            &format!("pcode {pcode} claimed by {} Locations", names.len()),
         );
     }
 
-    let mut order = retained;
-    order.sort_by(|&a, &b| {
-        let ra = &records[a as usize];
-        let rb = &records[b as usize];
+    let mut order: Vec<u32> = retained.iter().map(|&(i, _)| i).collect();
+    order.sort_by_key(|&i| {
+        let r = &records[i as usize];
         (
-            ra.country.as_str(),
-            ra.geometry.unwrap().kind.as_str(),
-            ra.hilbert,
+            r.country.as_str(),
+            r.geometry
+                .expect("retained rows have geometry")
+                .kind
+                .as_str(),
+            r.hilbert,
         )
-            .cmp(&(
-                rb.country.as_str(),
-                rb.geometry.unwrap().kind.as_str(),
-                rb.hilbert,
-            ))
     });
 
     Ok(Index {
@@ -194,6 +210,25 @@ mod tests {
         assert!(!retained.contains(&"ghost"));
         assert!(!retained.contains(&"remote"));
         assert!(!retained.contains(&"cyc-a"));
+        // Exact order: sorted by the three-key (country, geometry kind,
+        // Hilbert key) over the fixed WGS84 extent. Seven of the eight
+        // retained rows are country "NG" (sorting before "unknown"), and
+        // within a country group points ("point" < "polygon") come before
+        // polygons; "orphan" is the sole "unknown"-country row and so
+        // sorts last regardless of its own (point) kind.
+        assert_eq!(
+            retained,
+            vec![
+                "clinic",
+                "stray",
+                "ng",
+                "kano",
+                "dup",
+                "gama",
+                "nassarawa",
+                "orphan"
+            ]
+        );
         let clinic = idx(&index, "clinic");
         assert_eq!(index.records[clinic].country, "NG");
         assert_eq!(index.records[clinic].tier, "site");
@@ -245,5 +280,46 @@ mod tests {
         assert_eq!(index.records.len(), 1);
         assert!(index.order.is_empty());
         assert_eq!(index.report.count("no_geometry"), 1);
+    }
+
+    #[test]
+    fn dropped_rows_do_not_create_duplicate_pcodes() {
+        // Two Locations share a pcode, but only one of them is retained
+        // (the other has no usable geometry): no duplicate should be
+        // reported, since the dropped row never reaches the output.
+        let ndjson = concat!(
+            "{\"resourceType\":\"Location\",\"id\":\"a\",\"identifier\":[{\"system\":\"https://icr.healthcampaigns.org/identifiers/pcode\",\"value\":\"NG1\"}],\"position\":{\"longitude\":1,\"latitude\":2}}\n",
+            "{\"resourceType\":\"Location\",\"id\":\"b\",\"identifier\":[{\"system\":\"https://icr.healthcampaigns.org/identifiers/pcode\",\"value\":\"NG1\"}]}\n",
+        );
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), ndjson).unwrap();
+        let index = build_index(f.path(), None).unwrap();
+        assert_eq!(index.report.count("duplicate_pcode"), 0);
+        assert_eq!(index.order.len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_line_is_reported_and_the_run_continues() {
+        let ndjson = concat!(
+            "{\"resourceType\":\"Location\",\"id\":\"a\",\"position\":{\"longitude\":1,\"latitude\":2}}\n",
+            "garbage\n",
+            "{\"resourceType\":\"Location\",\"id\":\"b\",\"position\":{\"longitude\":3,\"latitude\":4}}\n",
+        );
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), ndjson).unwrap();
+        let index = build_index(f.path(), None).unwrap();
+        assert_eq!(index.read, 3);
+        assert_eq!(index.records.len(), 2);
+        assert_eq!(index.report.count("malformed_field"), 1);
+        assert_eq!(
+            index
+                .report
+                .issues
+                .iter()
+                .find(|i| i.kind == "malformed_field")
+                .unwrap()
+                .location_id,
+            "line 2"
+        );
     }
 }

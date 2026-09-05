@@ -117,7 +117,7 @@ impl Hierarchy {
 
     /// pcode of the level-0 admin ancestor, if any.
     pub fn country(&self, records: &[IndexRecord], i: usize) -> Option<String> {
-        self.admin_codes(records, i)[0].clone()
+        self.get(i)?.admin[0].and_then(|n| records[n.index()].pcode.clone())
     }
 }
 

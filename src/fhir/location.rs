@@ -225,6 +225,17 @@ impl Location {
             }
         };
 
+        if let Some(rt) = obj.get("resourceType").and_then(Value::as_str) {
+            if rt != "Location" {
+                report.add(
+                    "malformed_field",
+                    &id,
+                    &format!("resourceType is {rt}, not Location"),
+                );
+                return None;
+            }
+        }
+
         let mut loc = Location {
             id: id.clone(),
             ..Default::default()
@@ -463,6 +474,20 @@ mod tests {
             Some(Boundary::Url("https://files/x.geojson".into()))
         );
         assert_eq!(report.count("malformed_field"), 2);
+    }
+
+    #[test]
+    fn non_location_resources_are_rejected() {
+        let mut report = Report::default();
+        assert!(parse_str(r#"{"resourceType":"Patient","id":"a"}"#, &mut report).is_none());
+        assert_eq!(report.count("malformed_field"), 1);
+        let detail = &report.issues[0].detail;
+        assert_eq!(detail, "resourceType is Patient, not Location");
+
+        // A missing resourceType is tolerated.
+        let mut report = Report::default();
+        assert!(parse_str(r#"{"id":"a"}"#, &mut report).is_some());
+        assert_eq!(report.count("malformed_field"), 0);
     }
 
     #[test]

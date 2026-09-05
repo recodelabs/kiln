@@ -113,13 +113,6 @@ impl Iterator for NdjsonReader {
                     ))))
                 }
             };
-            if !text.starts_with('{') {
-                return Some(Err(KilnError::Usage(format!(
-                    "{}: line {}: not a JSON object",
-                    self.path.display(),
-                    self.number
-                ))));
-            }
             return Some(Ok(Line {
                 number: self.number,
                 offset: start + leading as u64,
@@ -222,12 +215,20 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_line_is_an_error_with_line_number() {
+    fn non_object_lines_are_yielded_for_the_caller_to_report() {
+        // `open()` already rejects a whole file that looks like a single
+        // pretty-printed JSON document; a per-line non-object (e.g. a
+        // malformed line in an otherwise-NDJSON file) is not this reader's
+        // job to reject -- it's yielded like any other line, and the
+        // caller (build_index) reports it as `malformed_field` once it
+        // fails to parse as JSON.
         let f = tmp("{\"id\":\"a\"}\nnot json\n");
         let mut reader = NdjsonReader::open(f.path()).unwrap();
-        reader.next().unwrap().unwrap();
-        let err = reader.next().unwrap().unwrap_err();
-        assert!(err.to_string().contains("line 2"), "{err}");
+        let first = reader.next().unwrap().unwrap();
+        assert_eq!(first.text, "{\"id\":\"a\"}");
+        let second = reader.next().unwrap().unwrap();
+        assert_eq!(second.number, 2);
+        assert_eq!(second.text, "not json");
     }
 
     #[test]
