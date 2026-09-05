@@ -1221,7 +1221,7 @@ Note the breaker: after `stop` is set, the scope still joins running workers (th
 
 **Files:** `src/snapshot/merge.rs`
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```rust
 #[cfg(test)]
@@ -1302,7 +1302,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 //! Phase three: stream the old snapshot and the incoming file into a new
@@ -1408,9 +1408,9 @@ pub fn merge(
 
 The incoming file and `notes` are index-aligned because the pager wrote one line per note; the `enumerate` relies on `NdjsonReader` skipping nothing (the pager never writes blank lines). If the counts differ, return an environment error ("incoming file and page notes disagree; rerun extract").
 
-- [ ] **Step 3: Run** `cargo test snapshot::merge` (3 passed).
+- [x] **Step 3: Run** `cargo test snapshot::merge` (3 passed).
 
-- [ ] **Step 4: Commit** `git commit -m "Merge the incoming file into the snapshot with boundary inlining"`
+- [x] **Step 4: Commit** `git commit -m "Merge the incoming file into the snapshot with boundary inlining"`
 
 ---
 
