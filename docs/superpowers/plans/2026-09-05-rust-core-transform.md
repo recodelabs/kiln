@@ -2827,7 +2827,7 @@ git commit -m "Write partitions as native-typed GeoParquet with legacy geo metad
 **Files:**
 - Modify: `src/write/dataset.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[cfg(test)]
@@ -2876,7 +2876,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement write_dataset**
+- [x] **Step 2: Implement write_dataset**
 
 ```rust
 //! Pass two: walk the sorted index, seek each line, build rows, write one
@@ -3131,12 +3131,12 @@ fn write_partitions(
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test write::dataset`
 Expected: 2 passed. The `point_outside_parent` expectation: `stray` at (50, 50) has parent `nassarawa` whose polygon is the (3,6)-(4,7) box, so it is outside; `clinic` at (3.25, 6.25) has nearest polygon ancestor `gama` (3.1..3.5, 6.1..6.5), inside; `orphan` has no ancestors; `dup` is a polygon whose representative point is inside itself, and its nearest polygon ancestor `kano` (3..6, 6..9) contains (4.5, 7.5). If the count is 2, print the report issues and check which extra row fired.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/write/dataset.rs
