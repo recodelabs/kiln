@@ -785,3 +785,129 @@ fn a_boundary_404_leaves_the_url_and_reports() {
     .unwrap();
     assert_eq!(report["counts"]["boundary_fetch_failed"], 1, "{report}");
 }
+
+/// Recursively collect every file under `dir` whose name ends in `.parquet`.
+fn find_parquet_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return out;
+    }
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(find_parquet_files(&path));
+        } else if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+            out.push(path);
+        }
+    }
+    out
+}
+
+#[test]
+fn run_extracts_then_transforms() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let burl = server.url("/b/ng.geojson").to_string();
+
+    // An admin unit "ng" with a polygon boundary served by the server, and a
+    // facility "clinic" that is partOf it with a position inside the square.
+    let ng = json!({
+        "resourceType": "Location",
+        "id": "ng",
+        "meta": {"lastUpdated": "2026-01-01T00:00:00Z"},
+        "status": "active",
+        "name": "ng",
+        "type": [{"coding": [{"code": "admin-unit"}]}],
+        "identifier": [{
+            "system": "https://icr.healthcampaigns.org/identifiers/pcode",
+            "value": "NG",
+        }],
+        "extension": [{
+            "url": BOUNDARY_EXT,
+            "valueAttachment": {"contentType": "application/geo+json", "url": burl},
+        }],
+    });
+    let clinic = json!({
+        "resourceType": "Location",
+        "id": "clinic",
+        "meta": {"lastUpdated": "2026-01-02T00:00:00Z"},
+        "status": "active",
+        "name": "clinic",
+        "type": [{"coding": [{"code": "facility"}]}],
+        "partOf": {"reference": "Location/ng"},
+        "position": {"longitude": 3.5, "latitude": 6.5},
+    });
+
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(vec![ng, clinic], None))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/ng.geojson"))
+            .times(1)
+            .respond_with(
+                status_code(200)
+                    .body(r#"{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}"#),
+            ),
+    );
+
+    let assert = kiln()
+        .args([
+            "run",
+            "--server",
+            &server.url("/fhir").to_string(),
+            "--snapshot",
+        ])
+        .arg(snap.path())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .success();
+
+    let parquet_files = find_parquet_files(&out.path().join("locations"));
+    assert!(!parquet_files.is_empty(), "{parquet_files:?}");
+
+    let stdout_text = stdout(&assert);
+    assert!(
+        stdout_text.contains("snapshot: 2 resources"),
+        "{stdout_text}"
+    );
+    assert!(
+        stdout_text.contains("Wrote 2 rows across 2 partitions"),
+        "{stdout_text}"
+    );
+
+    assert!(snap.path().join("state.json").exists());
+}
+
+#[test]
+fn run_skips_transform_when_extract_fails() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(status_code(401).body("no token for you")),
+    );
+
+    let assert = kiln()
+        .args([
+            "run",
+            "--server",
+            &server.url("/fhir").to_string(),
+            "--snapshot",
+        ])
+        .arg(snap.path())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .failure()
+        .code(1);
+
+    assert!(!out.path().join("locations").exists());
+    assert!(stderr(&assert).contains("401"), "{}", stderr(&assert));
+}

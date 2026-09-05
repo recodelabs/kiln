@@ -6,6 +6,7 @@ mod geometry;
 mod index;
 mod inspect;
 mod report;
+mod run;
 mod snapshot;
 mod transform;
 mod write;
@@ -18,10 +19,7 @@ fn main() {
         cli::Command::Transform(args) => transform::run_transform(&args),
         cli::Command::Inspect(args) => inspect::run_inspect(&args),
         cli::Command::Extract(args) => extract::run_extract(&args),
-        cli::Command::Run(args) => {
-            let _ = args.transform_args();
-            Err(error::KilnError::Usage("run: not implemented yet".into()))
-        }
+        cli::Command::Run(args) => run::run(&args),
     };
     if let Err(err) = result {
         eprintln!("kiln: {err}");
