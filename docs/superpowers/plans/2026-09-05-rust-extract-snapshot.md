@@ -1605,8 +1605,8 @@ Wire `Command::Run(args) => run::run(&args)`.
 
 ## Task 9: README and plan bookkeeping
 
-- [ ] **Step 1:** README Status block: `extract` and `run` implemented; `diff` and `load` in progress; Python still provides `bake`, `bake-points`, `load`. Repository layout: `snapshot/` and `extract/` no longer "(in progress)"; add `run.rs`. "The snapshot" section: mention `_extract_report.json` and the `ge` watermark semantics; add the four new report kinds to the report list. "Commands" block: extract flags as implemented.
-- [ ] **Step 2:** `cargo test`, commit `git commit -m "README: extract and run are implemented"`.
+- [x] **Step 1:** README Status block: `extract` and `run` implemented; `diff` and `load` in progress; Python still provides `bake`, `bake-points`, `load`. Repository layout: `snapshot/` and `extract/` no longer "(in progress)"; add `run.rs`. "The snapshot" section: mention `_extract_report.json` and the `ge` watermark semantics; add the four new report kinds to the report list. "Commands" block: extract flags as implemented.
+- [x] **Step 2:** `cargo test`, commit `git commit -m "README: extract and run are implemented"`.
 
 ---
 
