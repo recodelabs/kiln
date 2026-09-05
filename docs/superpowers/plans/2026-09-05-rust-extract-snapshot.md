@@ -622,7 +622,7 @@ impl FhirClient {
 
 **Files:** `src/extract/cache.rs`
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```rust
 #[cfg(test)]
@@ -676,7 +676,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 //! Content addressed cache of fetched boundary bytes, keyed by sha256 of the
@@ -751,9 +751,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::result::Result<(), String> {
 
 Note: two workers racing on the same URL each write their own `tmp<pid>`-suffixed file; the pid is the same within one process, so use a thread-unique suffix instead: `format!("{}.tmp{}-{:?}", ..., std::process::id(), std::thread::current().id())` (ThreadId's Debug is `ThreadId(N)`; sanitise to digits). Whichever renames last wins with identical bytes.
 
-- [ ] **Step 3: Run** `cargo test extract::cache` (5 passed). Verify interoperability: `python3 -c "import hashlib;print(hashlib.sha256(b'https://a/b').hexdigest())"` equals `cache_key("https://a/b")` (add that value as a literal assertion in the first test).
+- [x] **Step 3: Run** `cargo test extract::cache` (5 passed). Verify interoperability: `python3 -c "import hashlib;print(hashlib.sha256(b'https://a/b').hexdigest())"` equals `cache_key("https://a/b")` (add that value as a literal assertion in the first test).
 
-- [ ] **Step 4: Commit** `git commit -m "Add the content addressed boundary cache"`
+- [x] **Step 4: Commit** `git commit -m "Add the content addressed boundary cache"`
 
 ---
 
