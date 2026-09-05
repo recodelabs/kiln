@@ -270,7 +270,11 @@ GeoPandas all read it; older readers fall back to the metadata.
 
 ### Columns
 
-One row per Location. Columns are named after the FHIR path they come from
+One row per Location that has a usable geometry and a resolved place in the
+hierarchy. A Location with no geometry, a boundary that did not parse, an
+empty or unsupported geometry, a `partOf` chain that cycles or exceeds twelve
+levels, or an id that repeats an earlier one is reported and produces no row.
+Columns are named after the FHIR path they come from
 wherever one exists, so you can guess the column from the resource and the
 resource from the column. They fall into four groups, and the group tells you
 whether an edit to the column will flow back to FHIR.
@@ -310,14 +314,14 @@ geometry, and the position is kept in its own columns.
 |---|---|
 | `depth` | number of `partOf` hops to the root |
 | `admin_level` | 0 for country, 1 for the first subdivision, and so on; null for sites |
-| `tier` | `0` to `4` for admin units, `site` for everything else |
+| `tier` | the admin level as text for admin units (`0` upward, in practice `0` to `4`), `site` for everything else |
 | `path` | `/ng/kano/nassarawa/gama/clinic` |
 | `ancestor_ids` | list of ids from the root down |
-| `admin0_name` … `admin4_name`, `admin0_code` … `admin4_code` | nearest admin ancestor at each level |
+| `admin0_name` … `admin4_name`, `admin0_code` … `admin4_code` | nearest admin ancestor at each level; an admin unit deeper than level 4 is reported as `admin_level_beyond_columns` and does not appear in these columns |
 | `overlays_admin_unit_ids` | admin units this operational area overlaps, when it is not in the tree |
 | `country` | ISO code, from the level 0 ancestor |
 | `geom_type` | `polygon` or `point` |
-| `lon`, `lat` | a representative point guaranteed inside the geometry, for labelling |
+| `lon`, `lat` | the FHIR position when the resource has one, otherwise a point inside the geometry; a position that falls outside its own boundary is reported as `position_outside_boundary` and is written as given |
 | `bbox` | struct of `xmin, ymin, xmax, ymax` |
 
 **Lossless fallback.**
@@ -337,9 +341,30 @@ through QGIS untouched.
 `_report.json` records what transform found and could not or would not fix:
 dangling parents, cycles, nodes orphaned by a cycle upstream, duplicate
 p-codes, boundaries that did not parse, invalid polygons, facilities whose GPS
-point falls outside their own district. Each has a code, a count, and the
-affected ids. kiln keeps going past all of them. Deciding what to do about
-them is the registry owner's job, and the report is how they find out.
+point falls outside their own district. kiln keeps going past all of them.
+Deciding what to do about them is the registry owner's job, and the report is
+how they find out.
+
+The file has three keys. `counts` maps each issue kind to an exact count.
+`issues` lists individual issues as `{kind, location_id, detail}`, capped at
+1,000 per kind so a systematic fault cannot produce a report larger than the
+dataset; `truncated` maps any capped kind to the number omitted. For a few
+kinds `location_id` is not a single id: `duplicate_pcode` carries the
+comma-joined ids, `small_partition` and the `partition_value_*` kinds carry
+the partition path or `key=value`, and a resource with no id is `<unknown>`.
+
+The kinds, grouped by where they arise:
+
+- Resource shape: `missing_id`, `malformed_field`, `duplicate_id`
+- Boundary attachment: `boundary_bad_content_type`, `boundary_bad_base64`,
+  `boundary_empty`, `boundary_unresolved_url`, `boundary_unparseable`,
+  `boundary_multi_feature`, `boundary_part_dropped`, `boundary_z_dropped`
+- Geometry: `no_geometry`, `geometry_empty`, `geometry_unexpected_type`,
+  `geometry_invalid`, `geometry_no_interior_point`, `position_outside_boundary`
+- Hierarchy: `orphan`, `cycle`, `unreachable_ancestor`, `too_deep`,
+  `no_country`, `admin_level_beyond_columns`
+- Dataset: `duplicate_pcode`, `point_outside_parent`, `small_partition`,
+  `partition_value_sanitized`, `partition_value_collision`, `row_vanished`
 
 ---
 
@@ -378,8 +403,10 @@ All of kiln's logic runs on this index:
 2. **Country.** From the level 0 ancestor, or the `--country` override.
 3. **Data quality.** Duplicate p-codes, missing geometry, unresolved boundary
    URLs.
-4. **Sort order.** A Hilbert curve key from the centre of each bounding box,
-   over the country's extent. Sort the index by partition, then by key.
+4. **Sort order.** A Hilbert curve key from the centre of each bounding box
+   over a fixed world extent, so keys are the same across snapshots and are
+   not disturbed by one far-flung outlier. Sort the index by partition, then
+   by key.
 
 ### Pass two: write
 
@@ -405,9 +432,11 @@ cheaper than swapping.
 
 ### Atomic output
 
-Each partition is written to a temporary file and renamed into place. The
-whole dataset directory is then swapped in one rename, with the previous
-dataset kept as a backup until the swap completes. A crash at any point
+Every partition is written into a staging directory beside the live dataset.
+Once all of them are complete the live dataset is renamed to a backup, the
+staging directory is renamed into its place, and the backup is removed; a
+later run that finds a leftover backup or staging directory cleans up before
+it starts. A crash at any point
 leaves either the old dataset or the new one, never a mixture and never a
 truncated file that a reader might mistake for a complete one.
 
@@ -685,7 +714,7 @@ Tests:
 cargo test
 ```
 
-Integration tests read the fixture snapshot under `tests/fixtures/`, run a
+Integration tests read the fixture snapshot under `tests/fixtures/snapshot/`, run a
 transform, and verify the output with DuckDB when it is on `PATH`; they skip
 that check otherwise. DuckDB is never linked into kiln.
 
@@ -717,19 +746,20 @@ slower per row, mostly in boundary parsing.
 kiln/
   Cargo.toml
   src/
-    main.rs, cli.rs
-    fhir/        Location parsing, profile extensions, NDJSON read and write
-    snapshot/    state.json, merge by id, watermark
-    extract/     FHIR client, paging, boundary fetch, boundary cache
+    main.rs, cli.rs, error.rs
+    fhir/        Location parsing, profile extensions, NDJSON reading
     index/       the pass one record, hierarchy, Hilbert key, partition choice
     geometry/    GeoJSON parse, validity, interior point, WKB
     write/       Parquet writers, geo metadata, atomic swap
     report.rs
-    diff/        GeoJSON and GeoParquet readers, resource reconstruction
-    load/        bundles, If-Match, capability preflight, retry
+    transform.rs, inspect.rs
+    snapshot/    (in progress) state.json, merge by id, watermark
+    extract/     (in progress) FHIR client, paging, boundary fetch, boundary cache
+    diff/        (in progress) GeoJSON and GeoParquet readers, resource reconstruction
+    load/        (in progress) bundles, If-Match, capability preflight, retry
   tests/
-    fixtures/
-  python/        the Python package: bake and bake-points
+    fixtures/snapshot/
+  python/        the Python package: extract, bake, bake-points and load
   docs/
     superpowers/ design specs, plans, and spikes
 ```
