@@ -156,7 +156,7 @@ Add `mod extract; mod run; mod snapshot;` once those modules exist (Tasks 1 and 
 
 **Files:** `src/snapshot/mod.rs`, `src/snapshot/instant.rs`, `src/main.rs` (`mod snapshot;`)
 
-- [ ] **Step 1: Tests for instant.rs**
+- [x] **Step 1: Tests for instant.rs**
 
 ```rust
 #[cfg(test)]
@@ -191,7 +191,7 @@ mod tests {
 
 (Verify the epoch value 1767323045 for 2026-01-02T03:04:05Z with `date -u -j -f "%Y-%m-%dT%H:%M:%SZ" 2026-01-02T03:04:05Z +%s` on macOS; fix the constant if it differs.)
 
-- [ ] **Step 2: Implement instant.rs**
+- [x] **Step 2: Implement instant.rs**
 
 ```rust
 //! FHIR `instant` values: parse to (seconds, nanos) since the epoch for
@@ -283,7 +283,7 @@ pub fn format_utc(t: SystemTime) -> String {
 }
 ```
 
-- [ ] **Step 3: Tests for snapshot/mod.rs**
+- [x] **Step 3: Tests for snapshot/mod.rs**
 
 ```rust
 #[cfg(test)]
@@ -326,7 +326,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Implement snapshot/mod.rs**
+- [x] **Step 4: Implement snapshot/mod.rs**
 
 ```rust
 //! The snapshot directory: locations.ndjson, state.json, the boundary cache,
@@ -401,9 +401,9 @@ pub fn same_server(a: &str, b: &str) -> bool {
 
 Create `src/snapshot/merge.rs` as a placeholder (`//! Filled in Task 6.`). Add `mod snapshot;` to main.rs.
 
-- [ ] **Step 5: Run** `cargo test snapshot` (7 passed), clippy clean (dead code expected until Task 7; if `-D warnings` fails only on dead code in new modules, run clippy without `-D` for now and note it).
+- [x] **Step 5: Run** `cargo test snapshot` (7 passed), clippy clean (dead code expected until Task 7; if `-D warnings` fails only on dead code in new modules, run clippy without `-D` for now and note it).
 
-- [ ] **Step 6: Commit** `git commit -m "Add snapshot paths, state file, and FHIR instant handling"`
+- [x] **Step 6: Commit** `git commit -m "Add snapshot paths, state file, and FHIR instant handling"`
 
 ---
 
