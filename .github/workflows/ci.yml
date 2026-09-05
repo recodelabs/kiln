@@ -1,0 +1,79 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked
+  release-build:
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - if: "!contains(matrix.target, 'musl')"
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - if: contains(matrix.target, 'musl')
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_musl: aarch64-linux-gnu-ar
+      - name: Rename binary for upload
+        shell: bash
+        run: |
+          set -eu
+          src="target/${{ matrix.target }}/release/kiln"
+          dest="kiln-${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            src="${src}.exe"
+            dest="${dest}.exe"
+          fi
+          mv "$src" "$dest"
+          echo "BIN_PATH=$dest" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kiln-${{ matrix.target }}
+          path: ${{ env.BIN_PATH }}
+          if-no-files-found: error

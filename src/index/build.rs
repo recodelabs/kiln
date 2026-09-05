@@ -1,0 +1,324 @@
+//! Pass one: stream the snapshot, keep an IndexRecord per Location, resolve
+//! the hierarchy, choose country and tier, and produce the output order
+//! (retained records sorted by partition then Hilbert key).
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use crate::fhir::ndjson::NdjsonReader;
+use crate::fhir::{Boundary, Location};
+use crate::geometry::{self, GeometrySummary};
+use crate::index::hierarchy::{resolve_hierarchy, Hierarchy};
+use crate::index::hilbert::hilbert_key;
+use crate::index::IndexRecord;
+use crate::report::Report;
+
+pub const UNKNOWN_COUNTRY: &str = "unknown";
+
+/// A fixed WGS84 extent for the Hilbert key, rather than the dataset's own
+/// bbox: keys stay deterministic across snapshots and are not skewed by a
+/// single outlier point far from the rest of the data. At ORDER 16 this
+/// gives roughly 5.5 km cells at the equator -- ample for clustering rows
+/// within a partition.
+pub const HILBERT_EXTENT: [f64; 4] = [-180.0, -90.0, 180.0, 90.0];
+
+pub struct Index {
+    /// Every parsed resource, in file order. The hierarchy is indexed by position here.
+    pub records: Vec<IndexRecord>,
+    pub hierarchy: Hierarchy,
+    /// Indices into `records` of the rows that will be written, in output order.
+    pub order: Vec<u32>,
+    pub report: Report,
+    /// Resources read from the file, including ones that failed to parse.
+    pub read: usize,
+}
+
+pub fn build_index(ndjson: &Path, country_override: Option<&str>) -> crate::error::Result<Index> {
+    let mut report = Report::default();
+    let mut records: Vec<IndexRecord> = Vec::new();
+    let mut read = 0usize;
+
+    for line in NdjsonReader::open(ndjson)? {
+        // Only I/O and encoding errors abort the run here; a line that
+        // fails to parse as JSON, or as a Location, is reported below and
+        // skipped so one bad line does not sink the whole snapshot.
+        let line = line?;
+        read += 1;
+        let value: serde_json::Value = match serde_json::from_str(&line.text) {
+            Ok(v) => v,
+            Err(err) => {
+                report.add(
+                    "malformed_field",
+                    &format!("line {}", line.number),
+                    &err.to_string(),
+                );
+                continue;
+            }
+        };
+        let Some(loc) = Location::parse(&value, &mut report) else {
+            continue;
+        };
+        if let Some(Boundary::Url(url)) = &loc.boundary {
+            report.add(
+                "boundary_unresolved_url",
+                &loc.id,
+                &format!("boundary is a url reference ({url}); run kiln extract to inline it"),
+            );
+        }
+        let geometry = geometry::summarize(&loc, &mut report);
+        records.push(IndexRecord {
+            id: loc.id,
+            part_of: loc.part_of,
+            name: loc.name,
+            pcode: loc.pcode,
+            type_code: loc.type_code,
+            offset: line.offset,
+            len: line.len,
+            geometry,
+            ..Default::default()
+        });
+    }
+
+    // Resolved over every parsed record, including ones with no geometry:
+    // a geometry-less district is still somebody's parent.
+    let hierarchy = resolve_hierarchy(&records, &mut report);
+
+    let retained: Vec<(u32, GeometrySummary)> = (0..records.len())
+        .filter_map(|i| {
+            let r = &records[i];
+            match (hierarchy.get(i), r.geometry) {
+                (Some(_), Some(geom)) => Some((i as u32, geom)),
+                _ => None,
+            }
+        })
+        .collect();
+
+    for &(i, geom) in &retained {
+        let i = i as usize;
+        let country = match country_override {
+            Some(c) => c.to_string(),
+            None => match hierarchy.country(&records, i) {
+                Some(c) => c,
+                None => {
+                    report.add(
+                        "no_country",
+                        &records[i].id,
+                        "no admin-unit ancestor carries a pcode; filed under 'unknown'",
+                    );
+                    UNKNOWN_COUNTRY.to_string()
+                }
+            },
+        };
+        let tier = match hierarchy.get(i).and_then(|info| info.admin_level) {
+            Some(level) => level.to_string(),
+            None => "site".to_string(),
+        };
+        let b = geom.bbox;
+        let hilbert = hilbert_key([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], HILBERT_EXTENT);
+        let rec = &mut records[i];
+        rec.country = country;
+        rec.tier = tier;
+        rec.hilbert = hilbert;
+    }
+
+    // Duplicate-pcode detection is scoped to retained rows only: a dropped
+    // record (no geometry, or trimmed by the hierarchy resolver) never
+    // reaches the output, so it should never manufacture a collision with
+    // one that does.
+    let mut by_pcode: HashMap<&str, Vec<u32>> = HashMap::new();
+    for &(i, _) in &retained {
+        if let Some(p) = &records[i as usize].pcode {
+            by_pcode.entry(p.as_str()).or_default().push(i);
+        }
+    }
+    let mut dup_pcodes: Vec<&str> = by_pcode
+        .iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .map(|(&k, _)| k)
+        .collect();
+    dup_pcodes.sort();
+    for pcode in dup_pcodes {
+        let ids = &by_pcode[pcode];
+        let mut names: Vec<&str> = ids
+            .iter()
+            .map(|&i| records[i as usize].id.as_str())
+            .collect();
+        names.sort();
+        report.add(
+            "duplicate_pcode",
+            &names.join(", "),
+            &format!("pcode {pcode} claimed by {} Locations", names.len()),
+        );
+    }
+
+    let mut order: Vec<u32> = retained.iter().map(|&(i, _)| i).collect();
+    order.sort_by_key(|&i| {
+        let r = &records[i as usize];
+        (
+            r.country.as_str(),
+            r.geometry
+                .expect("retained rows have geometry")
+                .kind
+                .as_str(),
+            r.hilbert,
+        )
+    });
+
+    Ok(Index {
+        records,
+        hierarchy,
+        order,
+        report,
+        read,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/snapshot/locations.ndjson")
+    }
+
+    fn idx(index: &Index, id: &str) -> usize {
+        index
+            .records
+            .iter()
+            .position(|r| r.id == id)
+            .unwrap_or_else(|| panic!("no record {id}"))
+    }
+
+    #[test]
+    fn indexes_the_fixture_snapshot() {
+        let index = build_index(&fixture(), None).unwrap();
+        assert_eq!(index.read, 12);
+        assert_eq!(
+            index.records.len(),
+            12,
+            "every parsed resource stays addressable"
+        );
+        let retained: Vec<&str> = index
+            .order
+            .iter()
+            .map(|&i| index.records[i as usize].id.as_str())
+            .collect();
+        // dropped: remote (url boundary, no position), ghost (no geometry), cyc-a, cyc-b (cycle)
+        assert_eq!(retained.len(), 8, "{retained:?}");
+        assert!(!retained.contains(&"ghost"));
+        assert!(!retained.contains(&"remote"));
+        assert!(!retained.contains(&"cyc-a"));
+        // Exact order: sorted by the three-key (country, geometry kind,
+        // Hilbert key) over the fixed WGS84 extent. Seven of the eight
+        // retained rows are country "NG" (sorting before "unknown"), and
+        // within a country group points ("point" < "polygon") come before
+        // polygons; "orphan" is the sole "unknown"-country row and so
+        // sorts last regardless of its own (point) kind.
+        assert_eq!(
+            retained,
+            vec![
+                "clinic",
+                "stray",
+                "ng",
+                "kano",
+                "dup",
+                "gama",
+                "nassarawa",
+                "orphan"
+            ]
+        );
+        let clinic = idx(&index, "clinic");
+        assert_eq!(index.records[clinic].country, "NG");
+        assert_eq!(index.records[clinic].tier, "site");
+        assert_eq!(
+            index.hierarchy.admin_names(&index.records, clinic)[1].as_deref(),
+            Some("Kano")
+        );
+        let orphan = idx(&index, "orphan");
+        assert_eq!(index.records[orphan].country, "unknown");
+        assert_eq!(index.report.count("no_country"), 1);
+        assert_eq!(index.report.count("boundary_unresolved_url"), 1);
+        assert_eq!(index.report.count("duplicate_pcode"), 1);
+        assert_eq!(index.report.count("cycle"), 2);
+        assert_eq!(index.report.count("orphan"), 1);
+        assert_eq!(index.report.count("no_geometry"), 2, "ghost and remote");
+        // Sorted by partition then Hilbert: (country, geom kind) is non-decreasing along `order`.
+        let keys: Vec<(String, &str)> = index
+            .order
+            .iter()
+            .map(|&i| {
+                let r = &index.records[i as usize];
+                (r.country.clone(), r.geometry.unwrap().kind.as_str())
+            })
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
+        assert!(index
+            .order
+            .iter()
+            .all(|&i| index.records[i as usize].len > 0));
+    }
+
+    #[test]
+    fn country_override_wins() {
+        let index = build_index(&fixture(), Some("XX")).unwrap();
+        assert!(index
+            .order
+            .iter()
+            .all(|&i| index.records[i as usize].country == "XX"));
+        assert_eq!(index.report.count("no_country"), 0);
+    }
+
+    #[test]
+    fn empty_snapshot_yields_empty_order() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), b"{\"resourceType\":\"Location\",\"id\":\"x\"}\n").unwrap();
+        let index = build_index(f.path(), None).unwrap();
+        assert_eq!(index.records.len(), 1);
+        assert!(index.order.is_empty());
+        assert_eq!(index.report.count("no_geometry"), 1);
+    }
+
+    #[test]
+    fn dropped_rows_do_not_create_duplicate_pcodes() {
+        // Two Locations share a pcode, but only one of them is retained
+        // (the other has no usable geometry): no duplicate should be
+        // reported, since the dropped row never reaches the output.
+        let ndjson = concat!(
+            "{\"resourceType\":\"Location\",\"id\":\"a\",\"identifier\":[{\"system\":\"https://icr.healthcampaigns.org/identifiers/pcode\",\"value\":\"NG1\"}],\"position\":{\"longitude\":1,\"latitude\":2}}\n",
+            "{\"resourceType\":\"Location\",\"id\":\"b\",\"identifier\":[{\"system\":\"https://icr.healthcampaigns.org/identifiers/pcode\",\"value\":\"NG1\"}]}\n",
+        );
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), ndjson).unwrap();
+        let index = build_index(f.path(), None).unwrap();
+        assert_eq!(index.report.count("duplicate_pcode"), 0);
+        assert_eq!(index.order.len(), 1);
+    }
+
+    #[test]
+    fn a_malformed_line_is_reported_and_the_run_continues() {
+        let ndjson = concat!(
+            "{\"resourceType\":\"Location\",\"id\":\"a\",\"position\":{\"longitude\":1,\"latitude\":2}}\n",
+            "garbage\n",
+            "{\"resourceType\":\"Location\",\"id\":\"b\",\"position\":{\"longitude\":3,\"latitude\":4}}\n",
+        );
+        let f = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), ndjson).unwrap();
+        let index = build_index(f.path(), None).unwrap();
+        assert_eq!(index.read, 3);
+        assert_eq!(index.records.len(), 2);
+        assert_eq!(index.report.count("malformed_field"), 1);
+        assert_eq!(
+            index
+                .report
+                .issues
+                .iter()
+                .find(|i| i.kind == "malformed_field")
+                .unwrap()
+                .location_id,
+            "line 2"
+        );
+    }
+}
