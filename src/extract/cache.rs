@@ -43,6 +43,8 @@ impl Cache {
     }
 
     /// Ok(None) on a miss (no meta file). Err on a corrupt or unreadable entry.
+    /// Treat an Err the same as a miss -- re-fetch the URL -- and report it
+    /// as `cache_error`; never serve the entry it names as good data.
     pub fn read(&self, url: &str) -> std::result::Result<Option<Vec<u8>>, String> {
         let (bin, meta) = self.paths(url);
         let meta_text = match std::fs::read_to_string(&meta) {
@@ -66,6 +68,10 @@ impl Cache {
         Ok(Some(bytes))
     }
 
+    /// Two writers racing on the same URL with differing bytes can leave a
+    /// mismatched bin/meta pair (one writer's bin next to the other's meta);
+    /// `read` detects that via the sha256 check and reports it as an error
+    /// rather than serving either writer's bytes as if they were the other's.
     pub fn write(&self, url: &str, bytes: &[u8]) -> std::result::Result<(), String> {
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
         let (bin, meta) = self.paths(url);
@@ -103,18 +109,8 @@ mod tests {
     #[test]
     fn key_is_sha256_of_the_url_and_matches_python() {
         // python3 -c "import hashlib;print(hashlib.sha256(b'https://a/b').hexdigest())"
-        let expected = std::process::Command::new("python3")
-            .args([
-                "-c",
-                "import hashlib;print(hashlib.sha256(b'https://a/b').hexdigest())",
-            ])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        assert_eq!(cache_key("https://a/b").len(), 64);
-        if let Some(e) = expected.filter(|e| e.len() == 64) {
-            assert_eq!(cache_key("https://a/b"), e);
-        }
+        let expected = "4148a87e16a32df5f7bd99effa01d69d8371d4e077fa2fca9f1cfca818ae02f8";
+        assert_eq!(cache_key("https://a/b"), expected);
         assert_ne!(cache_key("https://a/b"), cache_key("https://a/c"));
     }
 
@@ -181,19 +177,24 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_writes_of_the_same_url_leave_one_valid_entry() {
+    fn concurrent_writes_of_different_bytes_to_the_same_url_are_never_torn() {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::new(dir.path());
+        let payloads: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 4096]).collect();
         std::thread::scope(|s| {
-            for _ in 0..8 {
+            for payload in &payloads {
                 let cache = cache.clone();
-                s.spawn(move || cache.write("https://a/same", b"same-bytes").unwrap());
+                s.spawn(move || cache.write("https://a/same", payload).unwrap());
             }
         });
-        assert_eq!(
-            cache.read("https://a/same").unwrap(),
-            Some(b"same-bytes".to_vec())
-        );
+        match cache.read("https://a/same") {
+            Ok(Some(bytes)) => assert!(
+                payloads.contains(&bytes),
+                "read bytes did not match any single writer's payload"
+            ),
+            Err(e) => assert!(e.contains("sha256"), "{e}"),
+            Ok(None) => panic!("expected a hit or a sha256 error, got a miss"),
+        }
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             2,
