@@ -8,6 +8,9 @@
 //! keeping it small (see `size_of_hierarchy_info_is_small` below); id
 //! strings are looked back up in `records` only on demand, and only for
 //! the handful of nodes a caller actually asks about.
+//!
+//! Duplicate ids resolve to the first occurrence (the Python used the
+//! last); deliberate.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -18,6 +21,10 @@ use crate::report::Report;
 
 pub const MAX_DEPTH: usize = 12;
 pub const ADMIN_COLUMNS: usize = 5;
+
+/// Bound on how many ids a report `detail` string reconstructs, so a
+/// malformed chain or cycle of size n costs O(n) to report, not O(n^2).
+const DETAIL_CAP: usize = 32;
 
 /// A record index, stored as `NonZeroU32(index + 1)` so `Option<NodeIdx>`
 /// fits in the niche and costs 4 bytes instead of the 8 bytes a plain
@@ -143,16 +150,25 @@ enum Outcome {
     Dropped(Reason),
 }
 
-/// Ids from root to `idx` inclusive, reconstructed from `parent` at report
-/// time (only ever called for the handful of nodes actually reported).
+/// The `cap` ids closest to `start` on its root..start chain (root-first
+/// order), reconstructed from `parent` at report time (only ever called
+/// for the handful of nodes actually reported). Stops after `cap` ancestors
+/// rather than walking to the true root, so a single call is O(cap) even
+/// on a chain of a million nodes; the bool says whether it was cut short.
 fn root_chain_ids<'a>(
     start: u32,
     parent: &[Option<u32>],
     records: &'a [IndexRecord],
-) -> Vec<&'a str> {
+    cap: usize,
+) -> (Vec<&'a str>, bool) {
     let mut ids = Vec::new();
     let mut idx = start;
-    for _ in 0..=records.len() {
+    let mut truncated = false;
+    loop {
+        if ids.len() >= cap {
+            truncated = true;
+            break;
+        }
         ids.push(records[idx as usize].id.as_str());
         match parent[idx as usize] {
             Some(p) => idx = p,
@@ -160,7 +176,7 @@ fn root_chain_ids<'a>(
         }
     }
     ids.reverse();
-    ids
+    (ids, truncated)
 }
 
 /// Assign HierarchyInfo to every node in `path` (child-first order, as
@@ -183,12 +199,13 @@ fn propagate(
 
         if too_deep || depth as usize >= MAX_DEPTH {
             too_deep = true;
-            let chain = root_chain_ids(idx, parent, records);
+            let (chain, truncated) = root_chain_ids(idx, parent, records, DETAIL_CAP);
+            let prefix = if truncated { "... -> " } else { "" };
             report.add(
                 "too_deep",
                 &records[idx as usize].id,
                 &format!(
-                    "chain exceeds MAX_DEPTH={MAX_DEPTH}: {}",
+                    "chain exceeds MAX_DEPTH={MAX_DEPTH}: {prefix}{}",
                     chain.join(" -> ")
                 ),
             );
@@ -253,16 +270,30 @@ fn handle_cycle(
 
     for j in pos..path.len() {
         let idx = path[j];
-        let mut seq: Vec<u32> = Vec::with_capacity(cycle_len + 1);
-        for k in 0..cycle_len {
-            seq.push(path[pos + (j - pos + k) % cycle_len]);
-        }
-        seq.push(idx);
-        let detail = seq
-            .iter()
-            .map(|&i| records[i as usize].id.as_str())
-            .collect::<Vec<_>>()
-            .join(" -> ");
+        let detail = if cycle_len <= DETAIL_CAP {
+            let mut seq: Vec<u32> = Vec::with_capacity(cycle_len + 1);
+            for k in 0..cycle_len {
+                seq.push(path[pos + (j - pos + k) % cycle_len]);
+            }
+            seq.push(idx);
+            seq.iter()
+                .map(|&i| records[i as usize].id.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        } else {
+            // Full rotation is O(cycle_len) per member, O(cycle_len^2)
+            // overall; cap it at DETAIL_CAP ids starting from this member.
+            let mut seq: Vec<u32> = Vec::with_capacity(DETAIL_CAP);
+            for k in 0..DETAIL_CAP {
+                seq.push(path[pos + (j - pos + k) % cycle_len]);
+            }
+            let joined = seq
+                .iter()
+                .map(|&i| records[i as usize].id.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            format!("{joined} ... (cycle of {cycle_len} nodes)")
+        };
         report.add("cycle", &records[idx as usize].id, &detail);
         status[idx as usize] = Status::Dropped(Reason::Cycle { entry: cyc_node });
     }
@@ -301,12 +332,13 @@ fn handle_dropped(
         Reason::TooDeep { depth: base_depth } => {
             let mut depth = base_depth.saturating_add(1);
             for &idx in path.iter().rev() {
-                let chain = root_chain_ids(idx, parent, records);
+                let (chain, truncated) = root_chain_ids(idx, parent, records, DETAIL_CAP);
+                let prefix = if truncated { "... -> " } else { "" };
                 report.add(
                     "too_deep",
                     &records[idx as usize].id,
                     &format!(
-                        "chain exceeds MAX_DEPTH={MAX_DEPTH}: {}",
+                        "chain exceeds MAX_DEPTH={MAX_DEPTH}: {prefix}{}",
                         chain.join(" -> ")
                     ),
                 );
@@ -659,5 +691,59 @@ mod tests {
     #[test]
     fn size_of_hierarchy_info_is_small() {
         assert!(std::mem::size_of::<HierarchyInfo>() <= 40);
+    }
+
+    #[test]
+    fn long_chain_and_long_cycle_report_quickly() {
+        use std::time::Instant;
+
+        // Long linear chain: n0..n19999, far past MAX_DEPTH. Reporting
+        // every too_deep node used to reconstruct its full root..node
+        // chain (O(n) per node, O(n^2) total); DETAIL_CAP bounds that.
+        let mut chain = vec![rec("n0", None, "admin-unit", Some("X"))];
+        for i in 1..20_000 {
+            chain.push(rec(
+                &format!("n{i}"),
+                Some(&format!("n{}", i - 1)),
+                "admin-unit",
+                None,
+            ));
+        }
+        let mut report = Report::default();
+        let start = Instant::now();
+        resolve_hierarchy(&chain, &mut report);
+        let elapsed = start.elapsed();
+        assert!(elapsed.as_secs() < 1, "too_deep reporting took {elapsed:?}");
+        assert_eq!(report.count("too_deep"), 19_988);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == "too_deep" && i.detail.contains("... ->")),
+            "expected a truncated too_deep detail"
+        );
+
+        // Long cycle: c0 -> c1 -> ... -> c19999 -> c0. The naive full
+        // rotation per member is O(cycle_len) each, O(cycle_len^2) total;
+        // DETAIL_CAP bounds that too.
+        let cyc: Vec<IndexRecord> = (0..20_000)
+            .map(|i| {
+                let parent = format!("c{}", (i + 1) % 20_000);
+                rec(&format!("c{i}"), Some(&parent), "admin-unit", None)
+            })
+            .collect();
+        let mut report = Report::default();
+        let start = Instant::now();
+        resolve_hierarchy(&cyc, &mut report);
+        let elapsed = start.elapsed();
+        assert!(elapsed.as_secs() < 1, "cycle reporting took {elapsed:?}");
+        assert_eq!(report.count("cycle"), 20_000);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.kind == "cycle" && i.detail.contains("(cycle of 20000 nodes)")),
+            "expected a cycle-count-capped detail"
+        );
     }
 }
