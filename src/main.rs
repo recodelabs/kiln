@@ -1,6 +1,7 @@
 mod cli;
 mod error;
 mod fhir;
+mod geometry;
 mod report;
 
 use clap::Parser;
