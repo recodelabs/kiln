@@ -1,7 +1,15 @@
 //! Phase two: resolve the distinct boundary URLs on a worker pool into the
 //! cache (or memory with --no-cache). Workers only fetch and write cache
 //! entries; the main thread consumes outcomes in submission order so the
-//! counters and any reports are deterministic.
+//! counters and any reports are deterministic. The results channel is
+//! bounded (`workers * 4`), so the `pending` reorder buffer is bounded by
+//! that capacity plus one in-flight item per worker, not by the worker
+//! count alone.
+//!
+//! A worker panicking (as opposed to a fetch merely failing) unwinds out of
+//! `thread::scope` and propagates to the caller of `fetch_boundaries`; that
+//! is deliberate; a panic is a bug in this module, not a per-URL data
+//! condition, and should not be swallowed into a `Failed` outcome.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -44,18 +52,36 @@ pub struct FetchSummary {
     pub in_memory: HashMap<String, Vec<u8>>,
 }
 
+/// Cheap pre-check before paying for a full JSON parse: only bodies that
+/// start with `{` (ignoring leading whitespace) and mention `"resourceType"`
+/// within their first 4 KiB can possibly be a FHIR Binary. This lets large
+/// non-JSON attachments (images, big GeoJSON blobs) skip the parse entirely.
+fn looks_like_binary_json(body: &[u8]) -> bool {
+    if body.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
+        return false;
+    }
+    const NEEDLE: &[u8] = b"\"resourceType\"";
+    let scan = &body[..body.len().min(4096)];
+    scan.len() >= NEEDLE.len() && scan.windows(NEEDLE.len()).any(|w| w == NEEDLE)
+}
+
 /// A 200 body: a FHIR Binary is base64-decoded; anything else is the bytes.
+/// xs:base64Binary permits line wrapping, so whitespace is stripped from
+/// `data` before decoding.
 pub fn extract_payload(body: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-        if v.get("resourceType").and_then(|t| t.as_str()) == Some("Binary") {
-            let data = v
-                .get("data")
-                .and_then(|d| d.as_str())
-                .filter(|d| !d.is_empty())
-                .ok_or("Binary has no data")?;
-            return base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map_err(|e| format!("Binary data is not valid base64: {e}"));
+    if looks_like_binary_json(body) {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+            if v.get("resourceType").and_then(|t| t.as_str()) == Some("Binary") {
+                let data = v
+                    .get("data")
+                    .and_then(|d| d.as_str())
+                    .filter(|d| !d.is_empty())
+                    .ok_or("Binary has no data")?;
+                let cleaned: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+                return base64::engine::general_purpose::STANDARD
+                    .decode(&cleaned)
+                    .map_err(|e| format!("Binary data is not valid base64: {e}"));
+            }
         }
     }
     Ok(body.to_vec())
@@ -104,7 +130,7 @@ pub fn fetch_boundaries(
     let workers = opts.concurrency.max(1).min(total.max(1));
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    let (tx, rx) = mpsc::channel::<(usize, Outcome, Vec<String>)>();
+    let (tx, rx) = mpsc::sync_channel::<(usize, Outcome, Vec<String>)>(workers * 4);
 
     let mut summary = FetchSummary::default();
     let interval = (total / 20).max(1);
@@ -444,5 +470,147 @@ mod tests {
         };
         let summary = fetch_boundaries(&client(1), &[], &opts, &mut Report::default()).unwrap();
         assert_eq!((summary.cached, summary.fetched, summary.failed), (0, 0, 0));
+    }
+
+    /// A slow-to-fail head-of-line URL must not let fast trailing outcomes
+    /// (including a success) be counted ahead of it: the breaker's
+    /// consecutive-failure count is driven by submission order, not receipt
+    /// order. Run several times since the whole point is to survive
+    /// scheduling variance.
+    #[test]
+    fn outcomes_are_applied_in_submission_order() {
+        for _ in 0..5 {
+            let server = Server::run();
+            server.expect(
+                Expectation::matching(request::method_path("GET", "/slow"))
+                    .times(1)
+                    .respond_with(delay_and_then(
+                        std::time::Duration::from_millis(300),
+                        status_code(500),
+                    )),
+            );
+            server.expect(
+                Expectation::matching(request::method_path("GET", "/fast1"))
+                    .times(1)
+                    .respond_with(status_code(500)),
+            );
+            server.expect(
+                Expectation::matching(request::method_path("GET", "/fast2"))
+                    .times(1)
+                    .respond_with(status_code(500)),
+            );
+            server.expect(
+                Expectation::matching(request::method_path("GET", "/fast3"))
+                    .times(1)
+                    .respond_with(status_code(200).body("g")),
+            );
+            let urls = vec![
+                server.url("/slow").to_string(),
+                server.url("/fast1").to_string(),
+                server.url("/fast2").to_string(),
+                server.url("/fast3").to_string(),
+            ];
+            let opts = FetchOptions {
+                concurrency: 4,
+                cache: None,
+                refresh: false,
+                max_consecutive_failures: 3,
+            };
+            let err =
+                fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap_err();
+            assert!(
+                err.to_string().contains("--max-consecutive-failures"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_cache_write_keeps_bytes_in_memory() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/x"))
+                .times(1)
+                .respond_with(status_code(200).body("payload")),
+        );
+        // An existing regular file where the cache expects a directory: writes fail.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let cache = Cache::new(file.path());
+        let url = server.url("/x").to_string();
+        let mut report = Report::default();
+        // refresh: true isolates the write failure -- with a cache dir that
+        // is really a file, a read would fail too, which is not what this
+        // test is about.
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: Some(cache),
+            refresh: true,
+            max_consecutive_failures: 0,
+        };
+        let summary =
+            fetch_boundaries(&client(1), std::slice::from_ref(&url), &opts, &mut report).unwrap();
+        assert_eq!(summary.fetched, 1);
+        assert_eq!(
+            summary.in_memory.get(&url).map(|v| v.as_slice()),
+            Some(&b"payload"[..])
+        );
+        assert_eq!(report.count("cache_error"), 1);
+    }
+
+    #[test]
+    fn breaker_stops_workers_early() {
+        let server = Server::run();
+        let requested = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // A small per-request delay gives the consumer thread a real (if
+        // brief) window to observe failures and flip `stop` before the
+        // worker pool could otherwise race through every URL; without it
+        // this test is flaky under CPU contention (e.g. the full suite
+        // running in parallel), since 10 in-process loopback requests can
+        // complete before the consumer is ever scheduled.
+        let counted_responder = {
+            let requested = requested.clone();
+            move || {
+                requested.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                status_code(500)
+            }
+        };
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/dead"))
+                .times(..)
+                .respond_with(counted_responder),
+        );
+        let urls: Vec<String> = (0..10)
+            .map(|i| server.url(&format!("/dead?i={i}")).to_string())
+            .collect();
+        let opts = FetchOptions {
+            concurrency: 2,
+            cache: None,
+            refresh: false,
+            max_consecutive_failures: 3,
+        };
+        fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap_err();
+        let seen = requested.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            seen < 10,
+            "breaker should have stopped workers early, but the server saw all {seen} of 10 requests"
+        );
+    }
+
+    #[test]
+    fn line_wrapped_binary_data_decodes() {
+        let payload = b"{\"type\":\"Point\"}";
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload);
+        // xs:base64Binary permits line wrapping; simulate a server that wraps
+        // at 8 chars using an *escaped* newline so the JSON stays valid --
+        // once parsed, the `data` string itself contains real newlines.
+        let wrapped: String = b64
+            .as_bytes()
+            .chunks(8)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect::<Vec<_>>()
+            .join("\\n");
+        let bin = format!(r#"{{"resourceType":"Binary","data":"{wrapped}"}}"#);
+        assert_eq!(extract_payload(bin.as_bytes()).unwrap(), payload);
     }
 }

@@ -152,7 +152,7 @@ impl FhirClient {
         for attempt in 1..=self.retries {
             match self.http.get(url).send() {
                 Err(e) => {
-                    last = Some(FetchError::Transport(format!("{url}: {e}")));
+                    last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
                         std::thread::sleep(jittered(backoff_delay(attempt, None)));
                     }
@@ -182,15 +182,13 @@ impl FhirClient {
                     } else {
                         return match resp.bytes() {
                             Ok(b) => Ok(Fetched { body: b.to_vec() }),
-                            Err(e) => {
-                                Err(FetchError::Transport(format!("{url}: reading body: {e}")))
-                            }
+                            Err(e) => Err(FetchError::Transport(format!("reading body: {e}"))),
                         };
                     }
                 }
             }
         }
-        Err(last.unwrap_or_else(|| FetchError::Transport(format!("{url}: no attempts made"))))
+        Err(last.unwrap_or_else(|| FetchError::Transport("no attempts made".to_string())))
     }
 }
 
