@@ -1,5 +1,6 @@
 mod cli;
 mod error;
+mod extract;
 mod fhir;
 mod geometry;
 mod index;
