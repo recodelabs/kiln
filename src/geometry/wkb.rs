@@ -34,6 +34,15 @@ mod tests {
     }
 
     #[test]
+    fn rect_encodes_as_polygon() {
+        let rect = geo::Rect::new((0., 0.), (1., 1.));
+        let bytes = to_wkb(&geo::Geometry::Rect(rect));
+        assert_eq!(bytes.len(), 93);
+        assert_eq!(&bytes[1..5], &3u32.to_le_bytes());
+        assert_eq!(&bytes[9..13], &5u32.to_le_bytes());
+    }
+
+    #[test]
     fn polygon_encodes_with_type_3() {
         let poly = polygon![(x: 0., y: 0.), (x: 1., y: 0.), (x: 1., y: 1.), (x: 0., y: 0.)];
         let bytes = to_wkb(&geo::Geometry::Polygon(poly));
