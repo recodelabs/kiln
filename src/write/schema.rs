@@ -246,11 +246,6 @@ impl RowBatch {
         }
     }
 
-    /// The schema `finish` builds record batches against.
-    pub fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-
     pub fn push(&mut self, r: &OutputRow) {
         self.id.append_value(&r.id);
         self.version_id.append_option(r.version_id.as_deref());

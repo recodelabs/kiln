@@ -6,6 +6,7 @@ use crate::cli::TransformArgs;
 use crate::error::{KilnError, Result};
 use crate::index::build_index;
 use crate::index::partition::parse_keys;
+use crate::report::Report;
 use crate::write::dataset::write_dataset;
 
 pub const SNAPSHOT_FILE: &str = "locations.ndjson";
@@ -35,8 +36,10 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
     // A stale report must never describe a dataset it does not match:
     // remove it before writing, rewrite it only on success.
     let report_path = args.out.join("_report.json");
-    if report_path.exists() {
-        std::fs::remove_file(&report_path).map_err(|e| KilnError::io(&report_path, e))?;
+    match std::fs::remove_file(&report_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(KilnError::io(&report_path, e)),
     }
 
     let written = write_dataset(&ndjson, &mut index, &args.out, &keys, args.row_group_size)?;
@@ -48,11 +51,15 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
         written.len(),
         args.out.display()
     );
+    for w in &written {
+        let rel = w.path.strip_prefix(&args.out).unwrap_or(&w.path);
+        eprintln!("  {} ({} rows)", rel.display(), w.rows);
+    }
     println!("{}", index.report.summary());
     Ok(())
 }
 
-pub fn write_report(path: &Path, report: &crate::report::Report) -> Result<()> {
+pub fn write_report(path: &Path, report: &Report) -> Result<()> {
     let text = serde_json::to_string_pretty(&report.to_json())?;
     std::fs::write(path, text).map_err(|e| KilnError::io(path, e))
 }

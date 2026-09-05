@@ -17,12 +17,11 @@ pub struct IndexRecord {
     pub offset: u64,
     pub len: usize,
     pub geometry: Option<GeometrySummary>,
-    pub position: Option<(f64, f64)>,
     /// Set during pass one after hierarchy and country resolution.
     pub country: String,
     pub tier: String,
     pub hilbert: u64,
 }
 
-pub use build::{build_index, Index, UNKNOWN_COUNTRY};
-pub use hierarchy::{resolve_hierarchy, Hierarchy, HierarchyInfo, NodeIdx, ADMIN_COLUMNS};
+pub use build::{build_index, Index};
+pub use hierarchy::ADMIN_COLUMNS;

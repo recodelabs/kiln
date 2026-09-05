@@ -30,7 +30,6 @@ pub struct WrittenPartition {
     /// `key=value/key=value` as written under the dataset directory.
     pub partition: String,
     pub rows: usize,
-    pub row_groups: usize,
 }
 
 /// Re-read and parse one record's line. Diagnostics were reported in pass
@@ -325,11 +324,15 @@ fn write_partitions(
         }
         writer.write(&mut batch)?;
         let stats = writer.finish(&geometry_types)?;
+        eprintln!(
+            "  {partition}: {} row group{}",
+            stats.row_groups,
+            if stats.row_groups == 1 { "" } else { "s" }
+        );
         written.push(WrittenPartition {
             path,
             partition,
             rows: stats.rows,
-            row_groups: stats.row_groups,
         });
     }
 

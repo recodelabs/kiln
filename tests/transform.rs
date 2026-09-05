@@ -46,7 +46,8 @@ fn transform_rejects_missing_snapshot_with_exit_2() {
         .arg(out.path())
         .assert()
         .failure()
-        .code(2);
+        .code(2)
+        .stderr(predicates::str::contains("locations.ndjson"));
 }
 
 #[test]
@@ -66,7 +67,7 @@ fn transform_rejects_bad_partition_key_with_exit_2() {
 }
 
 #[test]
-fn a_stale_report_is_removed_before_writing() {
+fn a_stale_report_is_replaced() {
     let out = tempfile::tempdir().unwrap();
     std::fs::write(out.path().join("_report.json"), "stale").unwrap();
     Command::cargo_bin("kiln")
@@ -79,6 +80,34 @@ fn a_stale_report_is_removed_before_writing() {
         .success();
     let text = std::fs::read_to_string(out.path().join("_report.json")).unwrap();
     assert!(text.contains("\"counts\""), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_transform_removes_the_stale_report_and_keeps_the_dataset() {
+    use std::os::unix::fs::symlink;
+
+    let out = tempfile::tempdir().unwrap();
+    let real = out.path().join("empty-real-dir");
+    std::fs::create_dir_all(&real).unwrap();
+    symlink(&real, out.path().join("locations")).unwrap();
+    std::fs::write(out.path().join("_report.json"), "stale").unwrap();
+
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["transform", "--snapshot"])
+        .arg(fixture_snapshot())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .failure()
+        .code(2);
+
+    assert!(!out.path().join("_report.json").exists());
+    assert!(
+        out.path().join("locations").is_symlink(),
+        "the dataset symlink must be left untouched"
+    );
 }
 
 #[test]
@@ -97,10 +126,12 @@ fn duckdb_reads_the_output_when_available() {
         .assert()
         .success();
     let glob = format!("{}/locations/**/*.parquet", out.path().display());
+
+    // Hard assertion: DuckDB (with no extensions) can read the dataset's
+    // columns and see the geometry column's native logical type.
     let sql = format!(
         "SELECT id, admin1_name, admin2_name, geom_type FROM '{glob}' WHERE id='clinic';\n\
-         SELECT name, logical_type FROM parquet_schema('{glob}') WHERE name='geometry';\n\
-         INSTALL spatial; LOAD spatial; SELECT count(*) FROM '{glob}' WHERE ST_Intersects(geometry, ST_MakeEnvelope(3,6,4,7));"
+         SELECT name, logical_type FROM parquet_schema('{glob}') WHERE name='geometry';"
     );
     let output = Command::new("duckdb")
         .args(["-csv", "-c", &sql])
@@ -114,8 +145,27 @@ fn duckdb_reads_the_output_when_available() {
     );
     assert!(text.contains("clinic,Kano,Nassarawa,point"), "{text}");
     assert!(text.contains("GeometryType"), "{text}");
+
+    // Best-effort: the spatial extension may not be cached in offline CI,
+    // so a failure to install/load it skips rather than fails the test.
+    let spatial_sql = format!(
+        "INSTALL spatial; LOAD spatial; SELECT count(*) FROM '{glob}' WHERE ST_Intersects(geometry, ST_MakeEnvelope(3,6,4,7));"
+    );
+    let spatial_output = Command::new("duckdb")
+        .args(["-csv", "-c", &spatial_sql])
+        .output()
+        .unwrap();
+    if !spatial_output.status.success() {
+        eprintln!(
+            "duckdb spatial extension unavailable; skipping envelope check: {}",
+            String::from_utf8_lossy(&spatial_output.stderr)
+        );
+        return;
+    }
+    let spatial_text = String::from_utf8(spatial_output.stdout).unwrap();
+    let last_line = spatial_text.lines().last().unwrap_or("").trim();
     // 7 of the 8 retained rows intersect the envelope (clinic, ng, kano,
     // dup, gama, nassarawa, orphan; only "stray" at (50, 50) is outside),
     // counting a boundary touch as an intersection per OGC semantics.
-    assert!(text.contains("\n7\n") || text.ends_with("7\n"), "{text}");
+    assert_eq!(last_line, "7", "{spatial_text}");
 }

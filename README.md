@@ -409,6 +409,10 @@ dataset kept as a backup until the swap completes. A crash at any point
 leaves either the old dataset or the new one, never a mixture and never a
 truncated file that a reader might mistake for a complete one.
 
+A failed transform leaves the previous dataset intact but removes
+`_report.json`. A report describing a dataset it does not match is worse
+than none: silence is at least honest about not knowing.
+
 ### Geometry handling
 
 GeoJSON is parsed with the `geojson` crate into `geo` types. Validity is

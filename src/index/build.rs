@@ -75,7 +75,6 @@ pub fn build_index(ndjson: &Path, country_override: Option<&str>) -> crate::erro
             offset: line.offset,
             len: line.len,
             geometry,
-            position: loc.position,
             ..Default::default()
         });
     }

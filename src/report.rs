@@ -48,6 +48,7 @@ impl Report {
         &self.counts
     }
 
+    #[cfg(test)]
     pub fn count(&self, kind: &str) -> usize {
         self.counts.get(kind).copied().unwrap_or(0)
     }
@@ -65,18 +66,18 @@ impl Report {
 
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "counts": self.counts,
+            "counts": self.counts(),
             "issues": self.issues,
             "truncated": self.truncated(),
         })
     }
 
     pub fn summary(&self) -> String {
-        if self.counts.is_empty() {
+        if self.counts().is_empty() {
             return "No issues found.".to_string();
         }
         let mut out = String::from("Issues found:");
-        for (kind, count) in &self.counts {
+        for (kind, count) in self.counts() {
             out.push_str(&format!("\n  {kind}: {count}"));
         }
         let truncated = self.truncated();
