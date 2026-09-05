@@ -3,7 +3,16 @@
 use wkb::writer::{write_geometry, WriteOptions};
 use wkb::Endianness;
 
+/// Encodes a `geo` geometry to little-endian WKB.
+///
+/// The `wkb` crate 0.9 mis-encodes `geo::Rect` (it omits the ring's point
+/// count), so callers must never pass a `Rect`; convert with
+/// `rect.to_polygon()` first.
 pub fn to_wkb(geom: &geo::Geometry<f64>) -> Vec<u8> {
+    debug_assert!(
+        !matches!(geom, geo::Geometry::Rect(_)),
+        "convert Rect to Polygon before encoding"
+    );
     let mut out = Vec::new();
     let options = WriteOptions {
         endianness: Endianness::LittleEndian,
@@ -31,5 +40,28 @@ mod tests {
         let poly = polygon![(x: 0., y: 0.), (x: 1., y: 0.), (x: 1., y: 1.), (x: 0., y: 0.)];
         let bytes = to_wkb(&geo::Geometry::Polygon(poly));
         assert_eq!(&bytes[1..5], &3u32.to_le_bytes());
+    }
+
+    #[test]
+    fn multipolygon_with_hole_has_full_layout() {
+        let poly_with_hole = polygon![
+            exterior: [
+                (x: 0., y: 0.), (x: 10., y: 0.), (x: 10., y: 10.), (x: 0., y: 10.), (x: 0., y: 0.),
+            ],
+            interiors: [
+                [
+                    (x: 2., y: 2.), (x: 2., y: 8.), (x: 8., y: 8.), (x: 8., y: 2.), (x: 2., y: 2.),
+                ],
+            ],
+        ];
+        let simple_poly = polygon![
+            (x: 20., y: 20.), (x: 30., y: 20.), (x: 25., y: 30.), (x: 20., y: 20.),
+        ];
+        let mp = geo::MultiPolygon(vec![poly_with_hole, simple_poly]);
+        let bytes = to_wkb(&geo::Geometry::MultiPolygon(mp));
+        assert_eq!(bytes.len(), 263);
+        assert_eq!(&bytes[1..5], &6u32.to_le_bytes());
+        assert_eq!(&bytes[5..9], &2u32.to_le_bytes());
+        assert_eq!(&bytes[10..14], &3u32.to_le_bytes());
     }
 }
