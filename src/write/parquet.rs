@@ -5,7 +5,7 @@
 //! docs/superpowers/spikes/2026-09-05-rust-native-geoparquet produced.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use arrow_array::Array;
 use parquet::arrow::ArrowWriter;
@@ -23,6 +23,7 @@ pub struct PartitionStats {
 
 pub struct PartitionWriter {
     writer: ArrowWriter<File>,
+    path: PathBuf,
     bbox: [f64; 4],
     rows: usize,
     row_groups: usize,
@@ -35,12 +36,21 @@ impl PartitionWriter {
         }
         let file = File::create(path).map_err(|e| KilnError::io(path, e))?;
         let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_max_row_group_size(row_group_size.max(1))
+            .set_compression(Compression::ZSTD(
+                // Write-once, read-many output: worth spending more CPU than
+                // the default level for a smaller file on disk.
+                ZstdLevel::try_new(3).expect("3 is a valid zstd level"),
+            ))
+            // The explicit flush() after every write() below is what actually
+            // delimits row groups; this is only a safety net in case a batch
+            // somehow exceeds the caller's intended row-group size.
+            .set_max_row_group_row_count(Some(row_group_size.max(1)))
             .build();
-        let writer = ArrowWriter::try_new(file, output_schema(), Some(props))?;
+        let writer = ArrowWriter::try_new(file, output_schema(), Some(props))
+            .map_err(|e| KilnError::parquet_at(path, e))?;
         Ok(Self {
             writer,
+            path: path.to_path_buf(),
             bbox: [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
             rows: 0,
             row_groups: 0,
@@ -54,30 +64,48 @@ impl PartitionWriter {
             return Ok(());
         }
         let rb = batch.finish()?;
+        let geometry = rb
+            .column_by_name(GEOMETRY_COLUMN)
+            .expect("schema has geometry");
         let bbox = rb.column_by_name(BBOX_COLUMN).expect("schema has bbox");
         let bbox = bbox
             .as_any()
             .downcast_ref::<arrow_array::StructArray>()
             .expect("bbox is a struct");
-        for (i, name) in ["xmin", "ymin", "xmax", "ymax"].iter().enumerate() {
-            let col = bbox
-                .column_by_name(name)
-                .expect("bbox field")
-                .as_any()
-                .downcast_ref::<arrow_array::Float64Array>()
-                .expect("f64");
-            for v in col.iter().flatten() {
+        let bbox_cols: Vec<&arrow_array::Float64Array> = ["xmin", "ymin", "xmax", "ymax"]
+            .iter()
+            .map(|name| {
+                bbox.column_by_name(name)
+                    .expect("bbox field")
+                    .as_any()
+                    .downcast_ref::<arrow_array::Float64Array>()
+                    .expect("f64")
+            })
+            .collect();
+        for row in 0..rb.num_rows() {
+            // Upstream is expected to drop rows whose geometry failed to
+            // build before they ever reach a RowBatch; this is a defensive
+            // check so a null geometry can never widen the file bbox.
+            if geometry.is_null(row) {
+                continue;
+            }
+            for (i, col) in bbox_cols.iter().enumerate() {
+                let v = col.value(row);
                 if i < 2 {
-                    self.bbox[i] = self.bbox[i].min(v)
+                    self.bbox[i] = self.bbox[i].min(v);
                 } else {
-                    self.bbox[i] = self.bbox[i].max(v)
+                    self.bbox[i] = self.bbox[i].max(v);
                 }
             }
         }
+        self.writer
+            .write(&rb)
+            .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
+        self.writer
+            .flush()
+            .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
+        self.row_groups = self.writer.flushed_row_groups().len();
         self.rows += rb.num_rows();
-        self.row_groups += 1;
-        self.writer.write(&rb)?;
-        self.writer.flush()?;
         Ok(())
     }
 
@@ -104,7 +132,9 @@ impl PartitionWriter {
         });
         self.writer
             .append_key_value_metadata(KeyValue::new("geo".into(), geo.to_string()));
-        self.writer.close()?;
+        self.writer
+            .close()
+            .map_err(|e| KilnError::parquet_at(self.path.clone(), e))?;
         Ok(PartitionStats {
             rows: self.rows,
             row_groups: self.row_groups,
@@ -166,10 +196,11 @@ mod tests {
             .find(|c| c.name() == "geometry")
             .unwrap();
         assert!(
-            matches!(geom_col.logical_type(), Some(LogicalType::Geometry(_))),
+            matches!(geom_col.logical_type_ref(), Some(LogicalType::Geometry(_))),
             "{:?}",
-            geom_col.logical_type()
+            geom_col.logical_type_ref()
         );
+        assert_eq!(meta.num_row_groups(), 2);
         let rg0 = meta
             .row_group(0)
             .columns()
@@ -178,6 +209,14 @@ mod tests {
             .unwrap();
         let bbox = rg0.geo_statistics().unwrap().bounding_box().unwrap();
         assert_eq!((bbox.get_xmin(), bbox.get_xmax()), (3.0, 3.5));
+        let rg1 = meta
+            .row_group(1)
+            .columns()
+            .iter()
+            .find(|c| c.column_path().string() == "geometry")
+            .unwrap();
+        let bbox1 = rg1.geo_statistics().unwrap().bounding_box().unwrap();
+        assert_eq!((bbox1.get_xmin(), bbox1.get_xmax()), (50.0, 50.0));
         let geo = meta
             .file_metadata()
             .key_value_metadata()
@@ -219,6 +258,35 @@ mod tests {
             .unwrap();
         let geo: serde_json::Value = serde_json::from_str(geo.value.as_ref().unwrap()).unwrap();
         assert!(geo["columns"]["geometry"]["bbox"].is_null());
+    }
+
+    #[test]
+    fn empty_batch_write_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-batch.parquet");
+        let mut writer = PartitionWriter::create(&path, 10).unwrap();
+        let mut batch = RowBatch::new();
+        batch.push(&row("a", 1.0, 2.0));
+        writer.write(&mut batch).unwrap();
+        // An empty batch between two real writes must not add a row group.
+        writer.write(&mut RowBatch::new()).unwrap();
+        batch.push(&row("b", 3.0, 4.0));
+        writer.write(&mut batch).unwrap();
+        let stats = writer.finish(&["Point".to_string()]).unwrap();
+        assert_eq!(stats.rows, 2);
+        assert_eq!(stats.row_groups, 2);
+    }
+
+    #[test]
+    fn zero_row_group_size_is_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zero-size.parquet");
+        let mut writer = PartitionWriter::create(&path, 0).unwrap();
+        let mut batch = RowBatch::new();
+        batch.push(&row("a", 1.0, 2.0));
+        writer.write(&mut batch).unwrap();
+        let stats = writer.finish(&["Point".to_string()]).unwrap();
+        assert_eq!(stats.rows, 1);
     }
 
     #[test]
