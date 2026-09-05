@@ -23,4 +23,4 @@ pub struct IndexRecord {
     pub hilbert: u64,
 }
 
-pub use hierarchy::{resolve_hierarchy, HierarchyInfo, ADMIN_COLUMNS};
+pub use hierarchy::{resolve_hierarchy, Hierarchy, HierarchyInfo, NodeIdx, ADMIN_COLUMNS};

@@ -1616,6 +1616,8 @@ Expected: compile errors.
 
 - [ ] **Step 4: Implement resolve_hierarchy**
 
+> Superseded during execution: the shipped `src/index/hierarchy.rs` is index-based. `resolve_hierarchy` returns a `Hierarchy { infos: Vec<Option<HierarchyInfo>> }` parallel to the records slice, where `HierarchyInfo` (~32 bytes) holds `depth`, `admin_count`, `admin_level`, `parent: Option<u32>` and `admin: [Option<u32>; 5]` as indices into records; `path`, `ancestor_ids`, `admin_names`, `admin_codes` and `country` are derived on demand by methods on `Hierarchy`. There is no chain cache; resolution is an O(n) memoised walk over parent indices. Duplicate ids are reported as `duplicate_id` (first occurrence wins). Consequence for Tasks 9 and 12: the `Index` must keep ALL parsed records as the addressing space (`records`), the parallel `hierarchy`, and a separate `order: Vec<u32>` of the retained record indices sorted by partition then Hilbert key. Pass two iterates `order`. The listings below are adjusted in the task prompts; treat the shipped files as the reference.
+
 ```rust
 //! Resolve partOf chains into depth, path, ancestor list and admin columns.
 //! A plain map walk with a chain cache, ported from the Python: at single
