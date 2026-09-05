@@ -1056,7 +1056,7 @@ git commit -m "Add streaming NDJSON reader with byte offsets and seek-back acces
 - Create: `src/geometry/mod.rs`, `src/geometry/geojson.rs`, `src/geometry/wkb.rs`
 - Modify: `src/main.rs` (add `mod geometry;`)
 
-- [ ] **Step 1: Write the failing tests for geojson.rs**
+- [x] **Step 1: Write the failing tests for geojson.rs**
 
 `src/geometry/geojson.rs`:
 
@@ -1100,7 +1100,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement parse_boundary**
+- [x] **Step 2: Implement parse_boundary**
 
 ```rust
 //! Boundary attachment bytes -> a `geo` geometry. Accepts a bare geometry, a
@@ -1187,7 +1187,7 @@ pub fn kind_name(g: &Geometry<f64>) -> &'static str {
 }
 ```
 
-- [ ] **Step 3: Write the failing test for wkb.rs**
+- [x] **Step 3: Write the failing test for wkb.rs**
 
 `src/geometry/wkb.rs`:
 
@@ -1214,7 +1214,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Implement to_wkb**
+- [x] **Step 4: Implement to_wkb**
 
 ```rust
 //! geo geometry -> little-endian WKB, the encoding Parquet GEOMETRY expects.
@@ -1232,7 +1232,7 @@ pub fn to_wkb(geom: &geo::Geometry<f64>) -> Vec<u8> {
 
 If `write_geometry` does not accept `&geo::Geometry<f64>` because `geo-types` in the lockfile lacks `geo_traits` impls, pin `geo-types = { version = "0.7.16" }` (that version implements `GeometryTrait`) and run `cargo update -p geo-types`.
 
-- [ ] **Step 5: Create src/geometry/mod.rs and register the module**
+- [x] **Step 5: Create src/geometry/mod.rs and register the module**
 
 ```rust
 pub mod geojson;
@@ -1244,12 +1244,12 @@ pub use wkb::to_wkb;
 
 Add `mod geometry;` to `src/main.rs`.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [x] **Step 6: Run tests to verify they pass**
 
 Run: `cargo test geometry`
 Expected: 5 passed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/geometry src/main.rs
