@@ -169,3 +169,44 @@ fn duckdb_reads_the_output_when_available() {
     // counting a boundary touch as an intersection per OGC semantics.
     assert_eq!(last_line, "7", "{spatial_text}");
 }
+
+#[test]
+fn inspect_summarises_a_written_dataset() {
+    let out = tempfile::tempdir().unwrap();
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["transform", "--snapshot"])
+        .arg(fixture_snapshot())
+        .arg("--out")
+        .arg(out.path())
+        .args(["--row-group-size", "2"])
+        .assert()
+        .success();
+    let assert = Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["inspect", "--out"])
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("8 rows across 3 partitions"), "{stdout}");
+    assert!(
+        stdout.contains("locations/country=NG/geom_type=polygon/part-0.parquet"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("row_groups=3"), "{stdout}");
+    assert!(stdout.contains("geo=1.1.0 covering=true"), "{stdout}");
+    assert!(stdout.contains("types=Polygon"), "{stdout}");
+}
+
+#[test]
+fn inspect_of_an_empty_dir_says_so() {
+    let out = tempfile::tempdir().unwrap();
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["inspect", "--out"])
+        .arg(out.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No parquet files found."));
+}
