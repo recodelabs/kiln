@@ -4,9 +4,10 @@
 //! [0, 30] s, a numeric Retry-After replacing the computed delay); any other
 //! 4xx is final.
 
+use std::io::Read as _;
 use std::time::Duration;
 
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
 
 use crate::error::{KilnError, Result};
@@ -14,6 +15,9 @@ use crate::error::{KilnError, Result};
 const RETRY_BASE: f64 = 0.5;
 const RETRY_MAX: f64 = 30.0;
 const ERROR_BODY_CAP: usize = 500;
+/// Never read more than this much of an error body off the wire; we only
+/// keep the first ERROR_BODY_CAP chars of it anyway.
+const ERROR_BODY_READ_LIMIT: u64 = 8192;
 
 #[derive(Debug)]
 pub enum FetchError {
@@ -33,9 +37,14 @@ impl std::fmt::Display for FetchError {
     }
 }
 
-#[derive(Debug)]
 pub struct Fetched {
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for Fetched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Fetched {{ body: <{} bytes> }}", self.body.len())
+    }
 }
 
 pub struct FhirClient {
@@ -57,8 +66,65 @@ fn cap(body: String) -> String {
     body.chars().take(ERROR_BODY_CAP).collect()
 }
 
+/// Read at most ERROR_BODY_READ_LIMIT bytes of an error response, then cap
+/// to ERROR_BODY_CAP chars. Bounded so a server that streams gigabytes of
+/// "error" doesn't make us buffer it all just to report a status code.
+fn read_error_body(resp: Response) -> String {
+    let mut buf = Vec::new();
+    let _ = resp.take(ERROR_BODY_READ_LIMIT).read_to_end(&mut buf);
+    cap(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// A crypto provider must be installed before the first `Client::builder()`
+/// call: reqwest is built with `rustls-no-provider`, so building a client
+/// panics at build time (not merely on the first request) if none is
+/// configured. Idempotent and cheap enough to call on every `new`.
+fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+    });
+}
+
+/// A factor in [0.5, 1.0) applied to a computed backoff delay. Eight
+/// workers retrying in lockstep after a shared 429 is a self-inflicted
+/// herd; spreading their sleeps out avoids re-synchronizing the retry.
+/// A cheap thread-local xorshift is plenty here — this isn't cryptographic,
+/// just enough spread to desynchronize concurrent retriers.
+fn jitter_factor() -> f64 {
+    thread_local! {
+        static RNG: std::cell::Cell<u64> = std::cell::Cell::new(seed());
+    }
+
+    fn seed() -> u64 {
+        let t = std::time::Instant::now();
+        (t.elapsed().as_nanos() as u64) | 1
+    }
+
+    fn xorshift(mut x: u64) -> u64 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    }
+
+    RNG.with(|cell| {
+        let next = xorshift(cell.get());
+        cell.set(next);
+        (next >> 11) as f64 / (1u64 << 53) as f64
+    })
+}
+
+fn jittered(delay: Duration) -> Duration {
+    let factor = 0.5 + 0.5 * jitter_factor();
+    Duration::from_secs_f64(delay.as_secs_f64() * factor)
+}
+
 impl FhirClient {
     pub fn new(token: Option<String>, retries: usize, timeout: Duration) -> Result<Self> {
+        ensure_crypto_provider();
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/fhir+json"));
         if let Some(t) = token {
@@ -73,7 +139,7 @@ impl FhirClient {
             .timeout(timeout)
             .user_agent(concat!("kiln/", env!("CARGO_PKG_VERSION")))
             .build()
-            .map_err(|e| KilnError::Usage(format!("cannot build HTTP client: {e}")))?;
+            .map_err(|e| KilnError::Environment(format!("cannot build HTTP client: {e}")))?;
         Ok(Self {
             http,
             retries: retries.max(1),
@@ -88,7 +154,7 @@ impl FhirClient {
                 Err(e) => {
                     last = Some(FetchError::Transport(format!("{url}: {e}")));
                     if attempt < self.retries {
-                        std::thread::sleep(backoff_delay(attempt, None));
+                        std::thread::sleep(jittered(backoff_delay(attempt, None)));
                     }
                 }
                 Ok(resp) => {
@@ -99,17 +165,19 @@ impl FhirClient {
                                 .get("retry-after")
                                 .and_then(|v| v.to_str().ok()),
                         );
+                        let delay = backoff_delay(attempt, ra);
+                        let delay = if ra.is_some() { delay } else { jittered(delay) };
                         last = Some(FetchError::Status {
                             status,
-                            body: cap(resp.text().unwrap_or_default()),
+                            body: read_error_body(resp),
                         });
                         if attempt < self.retries {
-                            std::thread::sleep(backoff_delay(attempt, ra));
+                            std::thread::sleep(delay);
                         }
                     } else if status != 200 {
                         return Err(FetchError::Status {
                             status,
-                            body: cap(resp.text().unwrap_or_default()),
+                            body: read_error_body(resp),
                         });
                     } else {
                         return match resp.bytes() {
@@ -131,14 +199,7 @@ mod tests {
     use super::*;
     use httptest::{matchers::*, responders::*, Expectation, Server};
 
-    // reqwest is built with `rustls-no-provider`; main.rs installs this for
-    // the real binary, but tests need it too, and only once per process.
-    fn ensure_crypto_provider() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-
     fn client(retries: usize) -> FhirClient {
-        ensure_crypto_provider();
         FhirClient::new(None, retries, std::time::Duration::from_secs(5)).unwrap()
     }
 
@@ -227,7 +288,6 @@ mod tests {
 
     #[test]
     fn bearer_and_accept_headers_are_sent() {
-        ensure_crypto_provider();
         let server = Server::run();
         server.expect(
             Expectation::matching(all_of![
@@ -252,8 +312,65 @@ mod tests {
         );
         let err = client(1).get(&server.url("/big").to_string()).unwrap_err();
         match err {
-            FetchError::Status { body, .. } => assert_eq!(body.len(), 500),
+            FetchError::Status { body, .. } => assert_eq!(body.chars().count(), 500),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn retry_after_is_honoured_on_a_503() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/s"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(503).append_header("Retry-After", "1"),
+                    status_code(200).body("ok")
+                ]),
+        );
+        let t = std::time::Instant::now();
+        client(3).get(&server.url("/s").to_string()).unwrap();
+        assert!(t.elapsed() >= std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn an_http_date_retry_after_falls_back_to_backoff() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/d"))
+                .times(2)
+                .respond_with(cycle![
+                    status_code(503).append_header("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+                    status_code(200).body("ok")
+                ]),
+        );
+        let t = std::time::Instant::now();
+        client(3).get(&server.url("/d").to_string()).unwrap();
+        let elapsed = t.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(200),
+            "{elapsed:?}"
+        );
+        assert!(elapsed <= std::time::Duration::from_secs(5), "{elapsed:?}");
+    }
+
+    #[test]
+    fn errors_reflect_the_final_attempt() {
+        // Both attempts fail to connect: the reported error is the transport error.
+        let err = client(2).get("http://127.0.0.1:9/nothing").unwrap_err();
+        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+
+        // Both attempts get a 503: the reported error is that status.
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/y"))
+                .times(2)
+                .respond_with(status_code(503)),
+        );
+        let err = client(2).get(&server.url("/y").to_string()).unwrap_err();
+        assert!(
+            matches!(err, FetchError::Status { status: 503, .. }),
+            "{err:?}"
+        );
     }
 }

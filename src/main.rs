@@ -13,12 +13,6 @@ mod write;
 use clap::Parser;
 
 fn main() {
-    // reqwest is built with `rustls-no-provider`, so no crypto provider is
-    // installed by default; without this, the first HTTPS request panics.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install rustls ring provider");
-
     let cli = cli::Cli::parse();
     let result: error::Result<()> = match cli.command {
         cli::Command::Transform(args) => transform::run_transform(&args),
