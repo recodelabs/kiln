@@ -36,9 +36,18 @@ fn parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         .map_err(|e| KilnError::io(dir, e))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
+    // `PathBuf`'s `Ord` compares component-by-component, not the raw string,
+    // so this already orders `part-2` before `part-10`; do not "simplify" it
+    // to a string sort.
     entries.sort();
     for path in entries {
-        if path.is_dir() {
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| KilnError::io(&path, e))?;
+        if meta.file_type().is_symlink() {
+            // Never follow a symlinked directory (e.g. a stray link left
+            // behind by a crashed swap) into someone else's files.
+            continue;
+        }
+        if meta.is_dir() {
             parquet_files(&path, out)?;
         } else if path.extension().is_some_and(|x| x == "parquet") {
             out.push(path);
@@ -47,9 +56,29 @@ fn parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Returns `(min, avg, max)` row-group sizes. `avg` rounds half-away-from-
+/// zero (e.g. 2.5 rows/group -> 3); the Python implementation used `round()`,
+/// which rounds half-to-even, so the two can disagree on exact ties.
+fn group_stats(groups: &[i64], rows: i64) -> (i64, i64, i64) {
+    if groups.is_empty() {
+        return (0, 0, 0);
+    }
+    let min = groups.iter().copied().min().unwrap();
+    let max = groups.iter().copied().max().unwrap();
+    let avg = (rows as f64 / groups.len() as f64).round() as i64;
+    (min, avg, max)
+}
+
 pub fn summarize(out_dir: &Path) -> Result<Summary> {
+    if !out_dir.is_dir() {
+        return Err(KilnError::Usage(format!(
+            "{}: no such directory",
+            out_dir.display()
+        )));
+    }
+    let dataset_dir = out_dir.join(crate::write::dataset::DATASET_DIR);
     let mut files = Vec::new();
-    parquet_files(out_dir, &mut files)?;
+    parquet_files(&dataset_dir, &mut files)?;
     let mut partitions = Vec::new();
     let mut total_rows = 0i64;
     let mut total_size_bytes = 0u64;
@@ -75,6 +104,8 @@ pub fn summarize(out_dir: &Path) -> Result<Summary> {
         let column = &geo["columns"][&primary];
         total_rows += rows;
         total_size_bytes += size_bytes;
+        let (min_row_group_rows, avg_row_group_rows, max_row_group_rows) =
+            group_stats(&groups, rows);
         partitions.push(PartitionSummary {
             path: path
                 .strip_prefix(out_dir)
@@ -83,13 +114,9 @@ pub fn summarize(out_dir: &Path) -> Result<Summary> {
                 .replace('\\', "/"),
             rows,
             row_groups: groups.len(),
-            min_row_group_rows: groups.iter().copied().min().unwrap_or(0),
-            avg_row_group_rows: if groups.is_empty() {
-                0
-            } else {
-                (rows as f64 / groups.len() as f64).round() as i64
-            },
-            max_row_group_rows: groups.iter().copied().max().unwrap_or(0),
+            min_row_group_rows,
+            avg_row_group_rows,
+            max_row_group_rows,
             size_bytes,
             geometry_types: column["geometry_types"]
                 .as_array()
@@ -137,6 +164,10 @@ pub fn format_summary(s: &Summary) -> String {
         String::new(),
     ];
     for p in &s.partitions {
+        // `covering` and `geo_version` render with Rust's default `bool`/
+        // `Option` formatting ("true"/"false", "none") rather than mimicking
+        // Python's "True"/"None" — this is a Rust CLI, not a port of its
+        // output byte-for-byte.
         lines.push(format!(
             "  {}\n    rows={} row_groups={} (min={} avg={} max={}) size={}\n    geo={} covering={} types={}",
             p.path,
@@ -170,6 +201,18 @@ mod tests {
         assert_eq!(human_size(1500), "1.5KB");
         assert_eq!(human_size(2_500_000), "2.5MB");
         assert_eq!(human_size(3_000_000_000), "3.0GB");
+    }
+
+    #[test]
+    fn group_stats_rounds_uneven_groups_half_away_from_zero() {
+        // 5 rows over 2 groups of [3, 2] averages 2.5, which rounds up to 3
+        // (Rust's `f64::round` rounds half away from zero).
+        assert_eq!(group_stats(&[3, 2], 5), (2, 3, 3));
+    }
+
+    #[test]
+    fn group_stats_of_no_groups_is_all_zero() {
+        assert_eq!(group_stats(&[], 0), (0, 0, 0));
     }
 
     #[test]

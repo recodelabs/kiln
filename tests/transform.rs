@@ -202,6 +202,7 @@ fn inspect_summarises_a_written_dataset() {
 #[test]
 fn inspect_of_an_empty_dir_says_so() {
     let out = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(out.path().join("locations")).unwrap();
     Command::cargo_bin("kiln")
         .unwrap()
         .args(["inspect", "--out"])
@@ -209,4 +210,76 @@ fn inspect_of_an_empty_dir_says_so() {
         .assert()
         .success()
         .stdout(predicates::str::contains("No parquet files found."));
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+#[test]
+fn inspect_ignores_stale_staging_and_backup_dirs() {
+    let out = tempfile::tempdir().unwrap();
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["transform", "--snapshot"])
+        .arg(fixture_snapshot())
+        .arg("--out")
+        .arg(out.path())
+        .assert()
+        .success();
+
+    let locations = out.path().join("locations");
+    copy_dir_recursive(&locations, &out.path().join(".locations.tmp"));
+    copy_dir_recursive(&locations, &out.path().join(".locations.bak"));
+
+    let assert = Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["inspect", "--out"])
+        .arg(out.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("8 rows across 3 partitions"), "{stdout}");
+    assert!(!stdout.contains(".locations"), "{stdout}");
+}
+
+#[test]
+fn inspect_names_a_corrupt_file() {
+    let out = tempfile::tempdir().unwrap();
+    let locations = out.path().join("locations");
+    std::fs::create_dir_all(&locations).unwrap();
+    let bad = locations.join("part-0.parquet");
+    std::fs::write(&bad, "not parquet").unwrap();
+
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["inspect", "--out"])
+        .arg(out.path())
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(bad.to_string_lossy().to_string()));
+}
+
+#[test]
+fn inspect_rejects_a_missing_dir_with_exit_2() {
+    let out = tempfile::tempdir().unwrap();
+    let missing = out.path().join("nonexistent");
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["inspect", "--out"])
+        .arg(&missing)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("no such directory"));
 }
