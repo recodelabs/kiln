@@ -1418,7 +1418,7 @@ The incoming file and `notes` are index-aligned because the pager wrote one line
 
 **Files:** `src/extract/mod.rs`, `src/main.rs`, `tests/extract.rs`
 
-- [ ] **Step 1: Integration tests (tests/extract.rs)**
+- [x] **Step 1: Integration tests (tests/extract.rs)**
 
 A helper builds a fake server with a `/fhir/Location` search that honours `_lastUpdated` (return a subset when the query contains `ge`), and boundary endpoints. Tests, each with its own `Server::run()` and `tempdir`:
 
@@ -1462,7 +1462,7 @@ fn extract_report_is_written() { /* a bundle entry without id -> _extract_report
 
 Write these out in full; each is 15-30 lines. Use `.times(..)` on expectations that may be hit a variable number of times and `.times(1)` where the count is the assertion (for example, that the cached boundary is never requested on the second run: register the boundary expectation with `.times(1)` and run twice).
 
-- [ ] **Step 2: Implement src/extract/mod.rs**
+- [x] **Step 2: Implement src/extract/mod.rs**
 
 ```rust
 //! `kiln extract`: page, fetch, merge. See the spec for the phase contracts.
@@ -1561,9 +1561,9 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
 
 Wire `Command::Extract(args) => extract::run_extract(&args)` in main.rs.
 
-- [ ] **Step 3: Run** `cargo test --test extract` (9 passed), full suite, `cargo clippy --all-targets -- -D warnings`.
+- [x] **Step 3: Run** `cargo test --test extract` (9 passed), full suite, `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Commit** `git commit -m "Add kiln extract: incremental snapshot from any FHIR R4 server"`
+- [x] **Step 4: Commit** `git commit -m "Add kiln extract: incremental snapshot from any FHIR R4 server"`
 
 ---
 
