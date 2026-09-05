@@ -1,506 +1,701 @@
 # kiln
 
-**New here? Read [ABOUT.md](ABOUT.md) first** — what kiln is for, with a worked example. This file is the command reference.
+**A bridge between a FHIR Location registry and modern GIS tools.**
 
-Export FHIR `Location` resources to partitioned GeoParquet — native Parquet
-geometry types, per-row covering bbox, Hilbert-sorted row groups.
+kiln turns the `Location` resources in a FHIR server into a GeoParquet dataset
+that QGIS, DuckDB, GeoPandas and web maps can read directly and fast, and
+carries edits made in those tools back into the FHIR server as ordinary FHIR
+updates. FHIR stays the master registry. The parquet is a derived, disposable
+projection of it.
 
-## Requirements
+It ships as a single static binary with no runtime dependencies: no Python, no
+GDAL, no database. It is designed to run on a laptop in a district office.
 
-- Python 3.11+
-- **System GDAL 3.13+** with a Parquet driver built against libarrow >= 21
-  (`brew install gdal`). kiln probes for `ogr2ogr`/`ogrinfo` and the
-  `USE_PARQUET_GEO_TYPES` capability at the start of `transform` and fails
-  with a clear message if either is missing or too old.
+> **Status.** This README describes the Rust rewrite of kiln, which is being
+> built now. The current Python implementation, which the rewrite replaces for
+> the export and load paths, is documented in [README-python.md](README-python.md).
+> The Python `bake` and `bake-points` commands (GeoJSON and CSV into FHIR) stay
+> in Python for now and live under `python/`.
 
-  The pipeline is two-pass because of this: `frame.py` stages the data as a
-  plain GeoDataFrame (WKB), and `ogr2ogr` is what rewrites each staged file
-  into the final output — it is the only writer available that emits native
-  Parquet geometry types rather than a GeoJSON/WKB workaround.
+---
 
-## Install
+## Contents
 
-```bash
-uv sync
-```
+- [Why kiln exists](#why-kiln-exists)
+- [What kiln does](#what-kiln-does)
+- [The workflow](#the-workflow)
+- [Commands](#commands)
+- [The snapshot](#the-snapshot)
+- [The output dataset](#the-output-dataset)
+- [How transform works: the two pass design](#how-transform-works-the-two-pass-design)
+- [Round trip: diff and load](#round-trip-diff-and-load)
+- [Reading the output](#reading-the-output)
+- [Design decisions](#design-decisions)
+- [What kiln does not do](#what-kiln-does-not-do)
+- [Future extensions](#future-extensions)
+- [Building](#building)
+- [Repository layout](#repository-layout)
 
-## Usage
+---
 
-One country per run.
+## Why kiln exists
 
-```bash
-# Fetch Locations, resolving any url-referenced boundary attachments
-uv run kiln extract \
-  --server https://healthcare.googleapis.com/v1/projects/.../fhir \
-  --token "$(gcloud auth print-access-token)" \
-  --out locations.ndjson
+Public health campaign systems built on FHIR keep their places, from the
+country down to the village clinic, as `Location` resources. That is the right
+home for them. A Location is linked to everything else in the registry: the
+organisations that run it, the campaigns that target it, the people and
+households recorded in it. It has identifiers from several systems, a version
+history, and a defined profile.
 
-# Convert to partitioned GeoParquet (offline — no network)
-uv run kiln transform --in locations.ndjson --out out/
+It is also, for GIS purposes, close to unusable.
 
-# Or both at once
-uv run kiln run --server ... --token ... --out out/
+A FHIR server is a document store. Each Location is one JSON document, linked to
+its parent by a `partOf` reference. To answer *how many clinics are in Kano
+state* you follow `partOf` from every clinic up the chain, in application code,
+one HTTP request at a time. Boundary polygons are base64 encoded GeoJSON inside
+an attachment extension. There is no spatial index, no spatial query, no way to
+ask for everything inside a bounding box. HAPI's Postgres tables are not a GIS
+schema you can point PostGIS at, and hosted FHIR stores expose no SQL at all.
 
-# Check what was written
-uv run kiln inspect --out out/
-```
+Meanwhile every GIS tool wants the same thing: a flat table with a geometry
+column, ideally in a format it can read over HTTP without downloading all of it.
+GeoParquet is that format. QGIS opens it. DuckDB queries it in place, from a
+laptop or from a bucket. GeoPandas loads it. A web map can fetch only the row
+groups that intersect the viewport.
 
-Every command below is written as `uv run kiln ...` for the same reason: `uv sync`
-alone does not put `kiln` on `PATH`. If you'd rather invoke it bare, activate the
-venv first (`source .venv/bin/activate`) or `uv pip install -e .` into an
-already-active environment.
+kiln is the translation between those two worlds, in both directions.
 
-`--token` falls back to `$KILN_TOKEN`.
+### Why a projection and not a query layer
 
-### `transform` is offline
+The alternative is to put a spatial API in front of the FHIR server. That means
+a running service, a second copy of the data that has to stay in sync, and a
+custom protocol every client has to learn. A file on disk or in a bucket is
+simpler in every way: no server, nothing to keep alive, every GIS tool already
+speaks it, and it can be rebuilt from the FHIR server at any time. If the
+parquet is wrong, delete it and run kiln again. Nothing is lost.
 
-`transform` never makes a network call. A boundary attachment that carries a
-`url` instead of inline `data` cannot be resolved by `transform` alone — it
-is left geometry-less and reported as `boundary_unresolved_url`. Run `kiln
-extract` first (or use `kiln run`); that is the step that fetches
-url-referenced boundaries and inlines them as base64 `data` before anything
-is written to NDJSON.
+### Why a single binary
 
-### Boundary fetching is concurrent, with retry
+kiln's users include people setting up a country deployment with limited
+connectivity, on machines with a few gigabytes of memory, without a Python or
+GDAL toolchain and without the ability to install one. The original Python
+kiln needed Python 3.11, a package manager, and a system GDAL built against a
+recent Arrow, because at the time GDAL was the only writer of the native
+Parquet geometry type. That is no longer true. The Rust Parquet implementation
+writes it directly, verified against GDAL, DuckDB and pyarrow (see
+[docs/superpowers/spikes/2026-09-05-rust-native-geoparquet](docs/superpowers/spikes/2026-09-05-rust-native-geoparquet)).
+So kiln can be one file you copy onto a machine and run.
 
-A registry can carry tens of thousands of url-referenced boundary
-attachments. `extract` fetches them on a pool of worker threads (default 8,
-`--concurrency`) sharing one HTTP client, instead of one at a time — with
-retry and exponential backoff (default 3 attempts, `--retries`) for
-connection errors, `5xx`, and `429`. A `429` or `5xx` honours a
-`Retry-After` header if the server sends one, in the numeric-seconds form
-(`Retry-After: 7`) — the HTTP-date form (`Retry-After: Wed, 21 Oct 2026
-07:28:00 GMT`) is not parsed and falls back to exponential backoff instead.
-A `404` (or any other non-retryable `4xx`) is *not* retried — it will still
-be missing on the third attempt, so retrying it only multiplies the wait —
-and is reported once as `boundary_fetch_failed`, same as before. Every
-sleep is capped at 30s **and floored at 0s**, so neither a pathological
-huge `Retry-After` nor a negative one can stall or crash the run. One
-boundary's fetch failing never aborts the others; progress (`resolved
-1200/50000 boundaries (14 failed)`) prints to stderr for runs large enough
-to matter, so a multi-hour fetch isn't silent throughout.
+---
 
-A server that is entirely unreachable (wrong token, bad `--server`, host
-down) is a different problem from a handful of dead boundary URLs: retrying
-every one of tens of thousands of Locations for up to a minute each before
-giving up would take hours to fail. `--max-consecutive-failures` (default
-50, `0` to disable) aborts the run early if that many boundary fetches in a
-row fail *and nothing has succeeded yet in the whole run* — the "zero
-successes" condition is what keeps a registry with a genuine scattering of
-dead URLs (a data problem) from ever tripping it, no matter how those
-failures happen to be distributed.
+## What kiln does
 
-### Fetched boundaries are cached on disk
-
-Admin boundaries change rarely — once a year at most — so `extract` caches
-every successfully-fetched boundary attachment under `--cache-dir` (default
-`~/.cache/kiln/boundaries/`), keyed on a sha256 hash of its URL. A second
-run over the same registry reads the cache instead of the network and is
-correspondingly fast; a run that gets killed halfway through a large fetch
-picks up where it left off next time instead of re-fetching everything,
-as a side effect of the same mechanism.
-
-The key is the URL alone — it deliberately does not include the auth
-token. That's a caveat, not a bug, but an unusual one: if you point two
-different servers (or two tokens with different access grants) at the
-*same* `--cache-dir`, and both happen to expose the same URL but would
-return different bytes for it per-token, the first one fetched wins and the
-second server silently gets served the first server's cached bytes instead
-of its own. This needs a fairly odd deployment to hit (shared cache
-directory, colliding URLs, token-dependent responses), but if that
-describes your setup, use a separate `--cache-dir` per server/token.
-
-Only successful fetches are cached — a `404` today may be a working URL
-tomorrow, so caching a failure would turn a transient outage into a
-permanent one. `--no-cache` disables the cache entirely for one run
-(neither read nor written); `--refresh` ignores whatever is already
-cached and re-fetches everything, but still writes the fresh results back
-so the cache is warm again afterward. A cache problem — an unreadable or
-corrupt entry, an unwritable `--cache-dir` — is reported as `cache_error`
-and treated as a miss for that one boundary; it never aborts the run,
-same as a boundary that fails to fetch outright.
-
-Each entry is two files, `<hash>.bin` (the raw fetched bytes) and
-`<hash>.meta.json` (`url`, `fetched_at`, and a `sha256` of `.bin`, checked
-on every read to catch a truncated or corrupted file before it's used).
-The metadata file is what makes the cache directory debuggable instead of
-just a pile of anonymous hex-named files — `grep` it for a URL to find
-which entry it maps to and when it was fetched. Both files are written
-temp-file-then-`os.replace`, same as `write.py`'s partition writes, so two
-worker threads racing to fill the same cache entry can't leave behind a
-half-written file for a later run to read as if it were complete.
-
-Alongside the existing fetch progress, `extract` prints a one-line summary
-to stderr, e.g. `boundaries: 4820 cached, 180 fetched, 3 failed`. Unlike the
-periodic progress ticker (which only appears for 50+ boundaries), this
-summary line always prints, even for a run with a handful of boundaries or
-none at all (`boundaries: 0 cached, 0 fetched, 0 failed`) — it's the only
-way to tell a fast run apart from one that just had nothing to do, and that
-distinction matters most exactly on the small runs the ticker skips.
-
-### `--in` must be NDJSON (or a single-line Bundle), not pretty-printed JSON
-
-`read_ndjson` streams the input line by line — deliberately, so a
-multi-gigabyte file with base64-inlined boundaries is never held in memory
-twice over. That means a **pretty-printed, multi-line** FHIR Bundle (e.g.
-`json.dumps(bundle, indent=2)`, or anything a text editor's "format
-document" produced) is not readable input: every line fails to parse as its
-own JSON value. `transform` detects this specific shape up front (the first
-non-blank line being just `{` or `[`, with nothing else on it) and exits
-immediately with status 2 and a clear message, rather than reporting a pile
-of `malformed_field` issues for every line and exiting 0 as if it had
-legitimately resolved zero rows. That distinction matters because
-`transform` fully owns `out/locations/` — a silently "successful" empty run
-would otherwise replace a user's previous good export with nothing, for an
-input kiln simply cannot read. Compact the file first if you hit this, e.g.
-`jq -c . input.json > input.ndjson`.
-
-A single-line Bundle (exactly what `kiln extract`/`write_ndjson` produce) is
-still supported — only a Bundle reformatted across multiple lines afterward
-is not.
-
-## Importing admin boundaries
-
-The reverse direction: a one-level admin GeoJSON file (all features at the
-same level, e.g. GRID3 wards) becomes ICRLocation-profiled resources in the
-store, ancestors minted from feature properties.
-
-```bash
-# Offline: GeoJSON -> Location NDJSON (inspect/validate before loading)
-uv run kiln bake \
-  --in data/GRID3_NGA_operational_wards_v3_0.geojson \
-  --country "Nigeria=NGA" \
-  --level state=state:statecode \
-  --level lga=lga \
-  --level ward=ward \
-  --alias lga=lga_alt_names --alias ward=ward_alt_names \
-  --out wards.ndjson
-
-# Network: NDJSON -> FHIR store (idempotent -- re-runs upsert in place)
-uv run kiln load \
-  --server https://healthcare.googleapis.com/v1/projects/.../fhir \
-  --token "$(gcloud auth print-access-token)" \
-  --in wards.ndjson
-```
-
-`--level` flags are ordered: the sequence is the hierarchy below the
-country, and the last one is the feature level that carries the geometry.
-Each flag is `LEVEL=NAME_PROP[:CODE_PROP]` — which property holds the
-unit's name, and (optionally) its code. Units get slug-path ids
-(`nga-ba-alkaleri-alkaleri-east`) built from codes where the source has
-them, names otherwise, so loading is `PUT`-idempotent.
-
-`kiln load` requires the store to support update-as-create (on Google
-Healthcare API: `enableUpdateCreate=true`); it checks the store's
-CapabilityStatement up front and refuses to half-load. A bundle failure
-aborts the run — re-running the whole load is always safe.
-
-Data problems (a feature missing its ward name, an invalid polygon) are
-reported and skipped; mapping problems (a `--level` property that matches
-nothing, two units slugging to the same id, a non-WGS84 CRS) abort before
-anything is written.
-
-### Facility and other point sites
-
-`kiln bake-points` does the same for point features from a CSV — health
-facilities, schools, any site — linking each row into an already-baked
-admin registry by name (names and aliases, slug-normalized, so `Tama/Daye`
-matches `Tama Daye`). Rows whose ward doesn't resolve link to the deepest
-ancestor that does and are reported as `parent_unresolved`.
-
-```bash
-uv run kiln bake-points \
-  --in facilities.csv \
-  --admin wards.ndjson \
-  --type facility \
-  --name-col facility_name --lat-col latitude --lon-col longitude \
-  --id-col globalid \
-  --parent state=state --parent lga=lga --parent ward=ward \
-  --identifier "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code=nhfr_facility_code" \
-  --where state=Bauchi \
-  --out facilities.ndjson
-```
-
-Sites come out `type` = the given ICR location-type code, `physicalType` =
-`si` Site, with `position` from the lat/lon columns — then `kiln load`
-upserts them like any other Location NDJSON.
-
-Pass `--paired-org` for the mCSD facility pairing: each row also emits an
-`Organization` (id `org-<row id>`) — the accountable facility entity — and
-the Location references it via `managingOrganization`. Registry codes move
-to the Organization (`--org-identifier SYSTEM_URI=COLUMN`), and
-`Organization.type` becomes the source of truth for classification via
-`--org-type-coding SYSTEM_URI=CODE_COLUMN[:TEXT_COLUMN]` (cell value
-slugified into the code — `Primary` → `primary` — raw value as display,
-optional text column for the country-specific kind; the generic `prov`
-coding is always added first). `kiln load` handles the mixed NDJSON:
-per-type PUT urls and an update-as-create preflight covering every loaded
-resource type.
-
-`--type-coding` (same syntax) additionally copies classification axes onto
-`Location.type` after the functional code — the mCSD-sanctioned
-duplication for Location-only consumers. Organization.type stays
-authoritative; the copy is what makes `facility_level` and `ownership`
-come out as columns in the GeoParquet export.
-
-By default only the feature level carries geometry — the minted ancestors
-(state, LGA) are boundary-less until an authoritative file for their level
-is loaded. Pass `--dissolve-parents` to give every ancestor a *derived*
-boundary instead: the union of its children's polygons. Derived boundaries
-are exactly consistent with the child tiling (rollups and containment
-checks line up), but they are not authoritative cartography — loading an
-official boundary file later upserts over them, since ids are stable.
-
-## Verified example
-
-Running `transform` against the test fixture (`tests/fixtures/locations.ndjson`,
-12 Locations exercising several of the failure modes below) produces:
+Given a FHIR server, kiln produces this:
 
 ```
-$ uv run kiln transform --in tests/fixtures/locations.ndjson --out out/
-Wrote 8 rows across 6 partitions to out
-Issues found:
-  boundary_unresolved_url: 1
-  cycle: 2
-  duplicate_pcode: 1
-  no_country: 1
-  no_geometry: 2
-  orphan: 1
-  point_outside_parent: 1
-  small_partition: 6
+FHIR server ──extract──▶ snapshot/ ──transform──▶ out/
+                          (NDJSON)               (GeoParquet, partitioned)
 ```
 
-```
-$ uv run kiln inspect --out out/
-8 rows across 6 partitions (84.9KB)
-
-  locations/country=NG/geom_type=point/tier=site/part-0.parquet
-    rows=2 row_groups=1 (min=2 avg=2 max=2) size=14.1KB
-    geo=1.1.0 covering=True types=Point
-  locations/country=NG/geom_type=polygon/tier=0/part-0.parquet
-    rows=1 row_groups=1 (min=1 avg=1 max=1) size=14.1KB
-    geo=1.1.0 covering=True types=Polygon
-  locations/country=NG/geom_type=polygon/tier=1/part-0.parquet
-    rows=1 row_groups=1 (min=1 avg=1 max=1) size=14.3KB
-    geo=1.1.0 covering=True types=Polygon
-  locations/country=NG/geom_type=polygon/tier=2/part-0.parquet
-    rows=2 row_groups=1 (min=2 avg=2 max=2) size=14.6KB
-    geo=1.1.0 covering=True types=Polygon
-  locations/country=NG/geom_type=polygon/tier=site/part-0.parquet
-    rows=1 row_groups=1 (min=1 avg=1 max=1) size=14.1KB
-    geo=1.1.0 covering=True types=Polygon
-  locations/country=unknown/geom_type=point/tier=site/part-0.parquet
-    rows=1 row_groups=1 (min=1 avg=1 max=1) size=13.7KB
-    geo=1.1.0 covering=True types=Point
-```
-
-Of the 12 input Locations, only 8 rows are written. The other 4 are omitted
-and each has a `no_geometry` (or, for the cycle members, `cycle`) entry in
-`_report.json`: the two cycle members (`cyc-a`, `cyc-b`), one Location with
-a url-only boundary and no fallback position (`remote`), and one Location
-with no position and no boundary at all (`ghost`). Everything else survives
-but some of it is flagged: `dup` and `nassarawa` both survive and are
-reported for sharing a pcode; `stray` survives and is reported for its point
-falling outside its parent polygon; `orphan` survives, filed under
-`country=unknown` because its dangling `partOf` leaves it with no admin
-ancestor to derive a country from.
-
-## Output layout
+and, when someone edits the data in a GIS tool, this:
 
 ```
-out/locations/country=NG/geom_type=polygon/tier=0/part-0.parquet
-out/locations/country=NG/geom_type=polygon/tier=1/part-0.parquet
-out/locations/country=NG/geom_type=point/tier=site/part-0.parquet
-out/_report.json
+edits.geojson ──diff (against snapshot)──▶ changes.ndjson ──load──▶ FHIR server
 ```
 
-`tier` is the admin level (as a string) for admin-units, `site` for
-everything else — see [Schema](#schema) for why it's a separate column from
-`admin_level`. Every file holds a single geometry type.
+The transform is where the value is. Take a clinic as the FHIR server stores it:
 
-`transform` fully owns `out/locations/`: every run's output *replaces* it as
-one atomic unit, so every successful run's output is an exact reflection of
-that run's input, including the case where it resolves zero rows. This is
-what makes re-running `transform` (or `run`) into the same `--out` — the
-normal nightly-refresh workflow — safe: without it, a changed
-`--partition-by` key set (a `--country` change, an admin level disappearing
-from source, all polygons failing to resolve) would leave the previous
-run's partitions behind, and DuckDB/geopq-workbench would read the old and
-new rows as one indistinguishable layer.
-
-The replacement is atomic, not clear-then-write: every partition is written
-into a hidden staging directory (`out/.locations.tmp/`) first, and only once
-*every* partition has finalized successfully is that staging directory
-swapped in for `out/locations/`. If any partition fails partway through —
-`ogr2ogr` crashing, a disk filling up — the staging directory is discarded
-and the previous `out/locations/`, if any, is left completely untouched, not
-a mix of old and new partitions. `out/_report.json` is deleted at the same
-point the write is attempted, before anything else, so a failed run never
-leaves behind a report that still describes an old, unrelated successful
-run as if it were current; on success it's rewritten to describe exactly
-what's now on disk. (A run that fails *before* attempting the write at all —
-a bad `--partition-by` column, a missing GDAL — never touches either the
-dataset or the report, same as before.)
-
-If `out/locations` is a symlink, `transform` refuses to run through it and
-exits with a clear error rather than crashing on the delete.
-
-## Options
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--country` | derived from the root admin-unit's pcode | Override the country partition value |
-| `--geo-types` | `both` | `both` = native Parquet geometry type, plus GeoParquet 1.1 sidecar metadata (`geo` key: version, geometry types, covering bbox). `only` = native geometry type with **no** GeoParquet sidecar metadata at all — `kiln inspect` and any other metadata-based reader will report `geo=None`, `covering=False`, empty `types=` for a perfectly valid file, so don't reach for `only` unless every downstream reader speaks native Arrow geometry types directly. `legacy` = plain WKB (no native geometry type), but *with* the GeoParquet 1.1 sidecar metadata — the most broadly compatible option |
-| `--partition-by` | `country,geom_type,tier` | Hive partition keys. A null value (e.g. partitioning by the nullable `admin_level`) is written to its own `key=null` directory rather than dropping those rows. A value containing a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) is sanitized for the directory name and reported as `partition_value_sanitized`; the underlying data is untouched. If two distinct values sanitize (or otherwise render) to the *same* directory segment — `"A/B"` and `"A_B"` both become `A_B`; `None` and the literal string `"null"` both become `null` — the second one gets a short hash suffix appended (e.g. `A_B~e466256d`) so they never collide on disk, and this is reported as `partition_value_collision`. An unknown column name exits with status 2 instead of a traceback. Partitioning by an integer column (e.g. the raw `admin_level` rather than the string `tier`) is accepted and written correctly, but breaks reading the output back with `pyarrow.dataset(..., partitioning="hive")` — see [Known reader gotchas](#known-reader-gotchas) |
-| `--row-group-size` | `20000` | Rows per Parquet row group |
-
-`kiln extract` also takes `--server` (required), `--token`, `--since`
-(`_lastUpdated=gt<since>`) and `--out`, plus the options below for
-resolving url-referenced boundary attachments. `kiln run` takes the union of
-`extract`'s and `transform`'s options and writes the intermediate NDJSON to
-`<out>/locations.ndjson`.
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--concurrency` | `8` | Worker threads fetching url-referenced boundary attachments concurrently, sharing one HTTP client |
-| `--retries` | `3` | Attempts per boundary fetch before giving up, with exponential backoff. Retries connection errors, `5xx`, and `429` (honouring `Retry-After` if present); a `404` or other non-retryable `4xx` is never retried |
-| `--cache-dir` | `~/.cache/kiln/boundaries/` | Local disk cache for fetched boundary attachments, keyed on a sha256 hash of each boundary's URL. A warm cache turns a second run over the same registry into a near-instant, no-network operation, and lets a killed-halfway run resume without re-fetching what it already has |
-| `--no-cache` | off | Disable the boundary cache entirely for this run — neither read nor write it |
-| `--refresh` | off | Ignore existing cache entries and re-fetch every boundary over the network, but still write the fresh results back so the cache is warm again afterward |
-| `--max-consecutive-failures` | `50` | Abort (`kiln extract` exits with status 2) if this many boundary fetches in a row fail with zero successes anywhere in the run — a signal of a systematic problem (server unreachable, wrong token, bad base URL), not a handful of bad boundary URLs. `0` disables this check |
-
-## Schema
-
-33 columns, one table, one row per Location that resolves. Every output
-file also carries a `geometry_bbox` struct column (added by `ogr2ogr` for
-the GeoParquet covering-bbox), which is not part of this 33.
-
-| Group | Column | Meaning |
-| --- | --- | --- |
-| identity | `id` | FHIR `Location.id` |
-| identity | `name` | `Location.name` |
-| identity | `status` | `Location.status` |
-| identity | `loc_type` | `Location.type[0].coding[0].code` (e.g. `admin-unit`, `settlement`, `facility`) |
-| identity | `physical_type` | `Location.physicalType[0].coding[0].code` |
-| join keys | `pcode` | Identifier value for the pcode system — the code used to join to other datasets |
-| join keys | `gers_id` | Identifier value for the Overture GERS system |
-| join keys | `identifiers` | Full `[{system, value}]` identifier list (superset of `pcode`/`gers_id`) |
-| hierarchy | `parent_id` | `Location.partOf`, reference stripped to a bare id |
-| hierarchy | `depth` | Distance from the root of this Location's `partOf` chain (root = 0) |
-| hierarchy | `admin_level` | Depth counting only `admin-unit` ancestors (root admin-unit = 0); **NULL for anything that is not itself an `admin-unit`** |
-| hierarchy | `tier` | `admin_level` as a string, or the literal `"site"`; always a string (see below) |
-| hierarchy | `path` | `/`-joined ids from root to this Location, inclusive |
-| hierarchy | `ancestor_ids` | Ids from root to parent, excluding self |
-| hierarchy | `admin0_name` … `admin4_name` | Name of the nearest `admin-unit` ancestor at each of 5 levels |
-| hierarchy | `admin0_code` … `admin4_code` | pcode of the same ancestors |
-| hierarchy | `country` | pcode of the root admin-unit ancestor, or the `--country` override; `"unknown"` if no ancestor carries a pcode |
-| domain | `settlement_type` | `settlement-type` extension value |
-| domain | `delivery_strategy` | `delivery-strategy` extension value |
-| domain | `overlays_admin_unit_ids` | Ids of admin-units this Location's catchment overlays (many-to-many, from the `overlays-admin-unit` extension) |
-| geometry | `geometry` | Point or polygon geometry — see [CRS](#crs) below |
-| geometry | `geom_type` | `"point"` or `"polygon"` (MultiPolygon folds into `"polygon"`) |
-| geometry | `lon`, `lat` | Representative point: `Location.position` if present, else `point_on_surface` of the polygon (not centroid — a centroid can fall outside a crescent-shaped district) |
-| provenance | `last_updated` | `Location.meta.lastUpdated` |
-
-`admin_level` is a nullable `Int64` so it stays a real, filterable integer
-column. `tier` exists as a separate string column because Hive-partitioning
-on a nullable int produces `__HIVE_DEFAULT_PARTITION__` directories for the
-null rows, which most readers (including geopq-workbench) handle badly.
-
-### `identifiers` changes type on write
-
-`identifiers` is `list<struct<system, value>>` in the staged frame. `ogr2ogr`
-converts it to a JSON-string Arrow extension type in the final output — the
-data survives and is human-readable, but a consumer reading the Parquet file
-directly gets a JSON string column, not native struct access. `ancestor_ids`
-and `overlays_admin_unit_ids` are plain `list<string>` and come through
-unchanged.
-
-## CRS
-
-The output CRS is **`OGC:CRS84`, not `EPSG:4326`.** `frame.py` builds the
-staged frame as EPSG:4326; `ogr2ogr` retags the finalized output as
-`OGC:CRS84`. Same datum, same longitude-then-latitude axis order — the
-coordinate values are identical and correct — but the CRS objects are not
-interchangeable in code:
-
-```python
->>> import pyproj
->>> pyproj.CRS("EPSG:4326") == pyproj.CRS("OGC:CRS84")
-False
->>> pyproj.CRS("EPSG:4326").equals(pyproj.CRS("OGC:CRS84"), ignore_axis_order=True)
-True
+```json
+{
+  "resourceType": "Location",
+  "id": "clinic",
+  "name": "Gama Clinic",
+  "status": "active",
+  "type": [{ "coding": [{ "code": "facility" }] }],
+  "partOf": { "reference": "Location/gama" },
+  "position": { "longitude": 3.25, "latitude": 6.25 },
+  "identifier": [{ "system": "https://icr.example/identifiers/pcode", "value": "NG001002001" }]
+}
 ```
 
-A naive `crs == "EPSG:4326"` check on the output will fail. Compare with
-`.equals(..., ignore_axis_order=True)`, or just don't compare CRS objects by
-identity.
+Nothing in that record says which state or district the clinic is in. After
+kiln, the same clinic is one row in a table alongside its neighbours:
 
-## Data quality
+```
+id         name          type        admin_level  tier   admin0_name  admin1_name  admin2_name  geom_type
+clinic     Gama Clinic   facility    -            site   Nigeria      Kano         Nassarawa    point
+gama       Gama          settlement  -            site   Nigeria      Kano         Nassarawa    polygon
+nassarawa  Nassarawa     admin-unit  2            2      Nigeria      Kano         Nassarawa    polygon
+kano       Kano          admin-unit  1            1      Nigeria      Kano         -            polygon
+ng         Nigeria       admin-unit  0            0      Nigeria      -            -            polygon
+```
 
-`out/_report.json` has a `counts` summary, a per-issue `issues` list
-(`kind`, `location_id`, `detail`), and a `truncated` map. Some issues
-describe a row that still made it into the output (e.g. `duplicate_pcode`);
-others describe a row that was **omitted** — if you're counting rows
-against your source count, the gap is explained here. For every
-`boundary_*` decode failure, the boundary is simply discarded, not the
-Location: if `Location.position` is also present, the row still comes
-through as a point. Only when neither a boundary nor a position survives
-does the row disappear, and that always additionally raises `no_geometry`
-on the same Location — grep the report for that id to see which applies.
+The clinic's row carries `Nigeria / Kano / Nassarawa`. kiln walked the
+`partOf` chain for every record, skipped past `gama` because a settlement is
+not an admin unit, and wrote the nearest real admin ancestor at each level as a
+plain column. Every row also has a full ancestry path, a geometry, a
+representative point, and the complete original FHIR resource as JSON, so
+nothing is lost in the projection.
 
-`issues` retains at most 1000 entries per kind — a systematic fault (every
-row using the `(0, 0)` default coordinate, a swapped lat/lon) can otherwise
-raise one issue per row and produce a report larger than the dataset it
-describes. `counts` is always exact regardless of the cap; it's the number
-to act on. `truncated` maps `kind -> count omitted from issues` for any kind
-that hit the cap, and is empty when nothing did; `summary()`'s printed
-output likewise only mentions the cap when it actually triggers.
+That table is what GIS tools want. Everything else in kiln exists to produce it
+reliably, quickly, incrementally, and in a form that can be edited and pushed
+back.
 
-| Kind | Row omitted? | Meaning |
-| --- | --- | --- |
-| `missing_id` | yes | The FHIR resource had no `id` (or a non-string one); dropped before any other processing |
-| `malformed_field` | usually no | A field documented as 0..\* or a specific shape arrived as something else (e.g. a string where a list was expected); the field is ignored and the Location keeps going. The one exception: a non-string `id` reports `malformed_field` *and* drops the resource entirely. A malformed NDJSON line (invalid JSON) is also reported this way, with the 1-based line number in `detail`, and that line alone is skipped |
-| `orphan` | no | `partOf` references an id not present in the input; the Location is treated as a root |
-| `cycle` | yes | This Location is itself part of a `partOf` cycle |
-| `unreachable_ancestor` | yes | This Location's ancestor chain passes through a cycle elsewhere (collateral damage, not a cycle member itself) |
-| `too_deep` | yes | The chain to the root exceeds `MAX_DEPTH` (12) |
-| `no_country` | no | No admin-unit ancestor carries a pcode; the row is filed under `country=unknown` |
-| `duplicate_pcode` | no | The same pcode is claimed by more than one Location |
-| `no_geometry` | yes | No `position` and no usable boundary — the final, definitive "this row is missing" signal |
-| `geometry_unexpected_type` | yes | A boundary parsed to a real geometry, but not a Point/Polygon/MultiPolygon, or the polygon was empty after repair — unlike the `boundary_*` kinds below, there is no fallback to `position` here |
-| `geometry_repaired` | no | An invalid polygon ring was fixed by `shapely.make_valid` |
-| `point_outside_parent` | no | A site's `(lon, lat)` falls outside its nearest polygon ancestor — in microplanning this is nearly always a real data error |
-| `boundary_bad_content_type` | only if no `position` | Boundary attachment `contentType` wasn't `application/geo+json` |
-| `boundary_bad_base64` | only if no `position` | Boundary attachment `data` wasn't valid base64 |
-| `boundary_empty` | only if no `position` | Boundary extension present but had neither `data` nor `url` |
-| `boundary_unparseable` | only if no `position` | Boundary GeoJSON couldn't be parsed, wasn't an object, or had no geometry |
-| `boundary_multi_feature` | no | A `FeatureCollection` had more than one feature; the geometries were unioned into one and used as-is |
-| `boundary_fetch_failed` | n/a (raised in `extract`) | `kiln extract` could not fetch a url-referenced boundary (network/HTTP error, or a `Binary` resource with bad/missing data); the attachment is left as-is, so `transform` will separately report `boundary_unresolved_url` for it |
-| `boundary_unresolved_url` | only if no `position` | `transform` saw a url-only boundary it can't fetch offline; run `kiln extract` first |
-| `cache_error` | n/a (raised in `extract`) | The on-disk boundary cache (`--cache-dir`) hit a problem for this one boundary — an unreadable/corrupt cache entry, or an unwritable cache directory. Treated as a cache miss: the boundary is (re-)fetched over the network as if it hadn't been cached at all, so this never stops the boundary itself from resolving |
-| `small_partition` | no | A written partition has fewer than `MIN_PARTITION_ROWS` (100) rows |
-| `partition_value_sanitized` | no | A `--partition-by` value contained a `/` or other filesystem-unsafe character (e.g. a pcode used as `--partition-by country`) and was rewritten for the directory name; the underlying data column is untouched |
-| `partition_value_collision` | no | Two distinct `--partition-by` values rendered to the *same* directory segment (e.g. `"A/B"` and `"A_B"` both sanitizing to `A_B`; `None` and the literal string `"null"` both rendering as `null`) — the second was given a short hash suffix (e.g. `A_B~e466256d`) so both are written to separate files instead of one silently overwriting the other |
+---
 
-## Checking the output
+## The workflow
 
-[geopq-workbench](https://github.com/gsueur/geopq-workbench) opens the output
-directory as a single layer and has a quality gate for exactly the properties
-kiln targets — spatial index present, row-group clustering, sensible row-group
-size
+A typical cycle, for one country:
 
-## Known reader gotchas
+1. **Extract.** Pull Location resources from the FHIR server into a local
+   snapshot. The first run fetches everything. Later runs fetch only what
+   changed since the last run and merge it in.
+2. **Transform.** Build the GeoParquet dataset from the snapshot. This is
+   offline and fast, and can be re-run as often as you like.
+3. **Publish.** Copy the output directory to wherever people read it: a shared
+   drive, an object storage bucket, a static web server. This step is outside
+   kiln; the output is plain files.
+4. **Use.** Open in QGIS. Query with DuckDB. Join to campaign data. Draw a map.
+5. **Edit.** Move a facility, correct a name, fix a ward boundary, add a new
+   site. Do this in QGIS or any tool that can write GeoJSON or GeoParquet.
+6. **Diff.** Compare the edited file to the snapshot. kiln works out which
+   Locations actually changed and writes them as complete FHIR resources.
+7. **Load.** Send the changed resources to the FHIR server, with a version
+   check so an edit made on the server in the meantime is never overwritten.
+8. **Extract again.** The snapshot picks up the new versions, and the cycle
+   continues.
 
-- **Partitioning by an integer column breaks hive-partitioned reads.**
-  `--partition-by` on a column that also survives into the row data itself
-  as a genuine integer (e.g. the raw `admin_level`, as opposed to the
-  string `tier` that exists specifically to avoid this) writes correctly,
-  but `pyarrow.dataset(path, partitioning="hive")` — what `kiln inspect`
-  and most other readers use — infers the partition column's type from the
-  *directory name* (a string) and the *in-file* column's type (`Int64`)
-  independently, and refuses to reconcile them:
-  `ArrowTypeError: ... incompatible types ...`. This is pre-existing (not
-  introduced by this change) and not fixed here; use `tier`, or another
-  string column, for hive partitioning, and reserve integer columns like
-  `admin_level`/`depth` for in-file filtering only.s.
+Steps 1 and 2 can run on a schedule or in response to a change notification.
+Steps 5 to 7 happen when someone has something to fix.
+
+---
+
+## Commands
+
+All commands are subcommands of one binary.
+
+```
+kiln extract   --server URL [--token T] --snapshot DIR [--full] [--concurrency N] [--retries N]
+kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
+kiln run       --server URL [--token T] --snapshot DIR --out DIR [...]
+kiln inspect   --out DIR
+kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson
+kiln load      --server URL [--token T] --in CHANGES.ndjson [--dry-run] [--batch-size N]
+```
+
+`--token` falls back to `$KILN_TOKEN`. Any FHIR R4 server that supports
+standard search with `_lastUpdated` and transaction bundles works; kiln does
+not depend on any vendor's extensions.
+
+`extract` and `load` touch the network. `transform`, `inspect` and `diff`
+never do. That split is deliberate: a slow server or an expired token has
+nothing to do with whether your geometry is valid, and keeping them apart means
+the whole geospatial half is testable from files with no server involved.
+
+---
+
+## The snapshot
+
+The snapshot is kiln's local copy of the registry and the unit of state
+between runs.
+
+```
+snapshot/
+  locations.ndjson     one Location resource per line, boundaries inlined
+  state.json           server URL, watermark, resource count, kiln version
+  boundaries/          content addressed cache of fetched boundary attachments
+```
+
+**`locations.ndjson`** holds every Location as the server returned it, with
+one change: a boundary attachment that referred to a URL has been fetched and
+inlined as base64 data, so the file is self contained. It is plain NDJSON. You
+can `grep` it, `jq` it, diff two of them, or hand one to someone else.
+
+**`state.json`** records the watermark: the latest `meta.lastUpdated` seen in
+the snapshot. The next extract asks the server for
+`Location?_lastUpdated=gt<watermark>` and merges the result by id: new ids are
+appended, existing ids are replaced. The merge rewrites the file, which is a
+sequential pass and takes seconds even for a large country.
+
+**`boundaries/`** is the boundary cache carried over from the Python kiln.
+Admin boundaries change rarely, and a registry can have tens of thousands of
+them, so every successfully fetched attachment is stored under a hash of its
+URL and served from disk on later runs. A run that is killed halfway through a
+long fetch resumes where it left off. Only successes are cached, so a
+temporary outage does not become a permanent one.
+
+### Incremental extract and its limits
+
+Incremental extract makes the routine case fast: a registry that changed by a
+few hundred resources since yesterday costs a few hundred resource fetches,
+not a hundred thousand.
+
+It has one blind spot. A resource that was **deleted** on the server does not
+appear in any search result, so an incremental extract cannot see it go. Two
+rules follow:
+
+- Locations should be retired, not deleted. Set `status` to `inactive`. That
+  is better registry practice anyway, because other resources may still refer
+  to them.
+- `kiln extract --full` discards the snapshot and fetches everything. Run it
+  occasionally, or whenever you suspect drift.
+
+---
+
+## The output dataset
+
+`transform` writes one GeoParquet dataset per snapshot:
+
+```
+out/
+  locations/
+    country=NG/
+      geom_type=polygon/part-0.parquet
+      geom_type=point/part-0.parquet
+  _report.json
+```
+
+Partitioned by country and geometry type only. Within each file, rows are
+sorted along a Hilbert curve so that places near each other on the ground sit
+near each other on disk, and every row group carries its bounding box in the
+Parquet geospatial statistics. A reader asking for one district touches a few
+kilobytes, including over HTTP with range requests.
+
+The geometry column uses the native Parquet `GEOMETRY` logical type, with the
+GeoParquet 1.1 file metadata and a `bbox` column alongside for readers that
+predate the logical type. GDAL 3.12+, QGIS, DuckDB 1.5+, pyarrow 21+ and
+GeoPandas all read it; older readers fall back to the metadata.
+
+### Columns
+
+One row per Location. Columns are named after the FHIR path they come from
+wherever one exists, so you can guess the column from the resource and the
+resource from the column. They fall into four groups, and the group tells you
+whether an edit to the column will flow back to FHIR.
+
+**Identity and version. Read only.**
+
+| column | from |
+|---|---|
+| `id` | `Location.id` |
+| `version_id` | `Location.meta.versionId` |
+| `last_updated` | `Location.meta.lastUpdated` |
+
+**Writable FHIR content. Edits flow back through `diff`.**
+
+| column | from |
+|---|---|
+| `name` | `Location.name` |
+| `alias` | `Location.alias`, list of string |
+| `status` | `Location.status` |
+| `description` | `Location.description` |
+| `type` | first `Location.type.coding.code` |
+| `physical_type` | `Location.physicalType.coding.code` |
+| `part_of` | `Location.partOf.reference`, as a bare id |
+| `managing_organization` | `Location.managingOrganization.reference`, as a bare id |
+| `identifier` | `Location.identifier`, list of struct `{system, value}` |
+| `position_longitude`, `position_latitude` | `Location.position` |
+| `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
+| `pcode`, `gers_id` | promoted from `identifier` by system, for convenience |
+| `settlement_type`, `delivery_strategy`, `facility_level`, `ownership` | the ICR profile extensions |
+
+A Location with both a boundary and a position is one row: the polygon is the
+geometry, and the position is kept in its own columns.
+
+**Derived hierarchy. Rebuilt on every transform, ignored by `diff`.**
+
+| column | meaning |
+|---|---|
+| `depth` | number of `partOf` hops to the root |
+| `admin_level` | 0 for country, 1 for the first subdivision, and so on; null for sites |
+| `tier` | `0` to `4` for admin units, `site` for everything else |
+| `path` | `/ng/kano/nassarawa/gama/clinic` |
+| `ancestor_ids` | list of ids from the root down |
+| `admin0_name` … `admin4_name`, `admin0_code` … `admin4_code` | nearest admin ancestor at each level |
+| `overlays_admin_unit_ids` | admin units this operational area overlaps, when it is not in the tree |
+| `country` | ISO code, from the level 0 ancestor |
+| `geom_type` | `polygon` or `point` |
+| `lon`, `lat` | a representative point guaranteed inside the geometry, for labelling |
+| `bbox` | struct of `xmin, ymin, xmax, ymax` |
+
+**Lossless fallback.**
+
+| column | content |
+|---|---|
+| `fhir_json` | the complete Location resource as JSON text, with the boundary attachment removed |
+
+The last column is the guarantee that the projection loses nothing. Any field
+kiln does not model as a column is still there, queryable with DuckDB's JSON
+functions, and `diff` uses it as the base when reconstructing an edited
+resource, so an extension kiln has never heard of survives a round trip
+through QGIS untouched.
+
+### The report
+
+`_report.json` records what transform found and could not or would not fix:
+dangling parents, cycles, nodes orphaned by a cycle upstream, duplicate
+p-codes, boundaries that did not parse, invalid polygons, facilities whose GPS
+point falls outside their own district. Each has a code, a count, and the
+affected ids. kiln keeps going past all of them. Deciding what to do about
+them is the registry owner's job, and the report is how they find out.
+
+---
+
+## How transform works: the two pass design
+
+The Python kiln held everything in memory: every resource, every parsed
+polygon, all at once in a dataframe. That is fine on a workstation and not
+fine on a two gigabyte laptop with a country of detailed ward boundaries.
+
+The Rust kiln reads the snapshot twice and never holds the geometries.
+
+### Pass one: index
+
+Read `locations.ndjson` line by line. For each resource, parse it and keep a
+small record:
+
+- the ids and text needed for the hierarchy: id, parent id, name, codes,
+  type, status, the promoted extension values
+- the **byte offset and length** of the line in the file
+- the geometry's **kind and bounding box**, computed by parsing the boundary
+  once and immediately discarding the parsed shape
+- any diagnostics found while parsing
+
+Then drop everything else. The record is on the order of a hundred bytes plus
+its strings. A million Locations index into a few hundred megabytes at most,
+and the polygons, which are where the real bulk is, are not resident.
+
+All of kiln's logic runs on this index:
+
+1. **Hierarchy.** Follow `partOf` from every node to the root, with
+   memoisation so shared ancestor chains are walked once. Detect dangling
+   parents, cycles, and nodes orphaned by a cycle. Assign depth, tier, path,
+   ancestor list, and the nearest admin ancestor at each level, walking past
+   settlements and operational areas that sit in the tree but are not admin
+   units.
+2. **Country.** From the level 0 ancestor, or the `--country` override.
+3. **Data quality.** Duplicate p-codes, missing geometry, unresolved boundary
+   URLs.
+4. **Sort order.** A Hilbert curve key from the centre of each bounding box,
+   over the country's extent. Sort the index by partition, then by key.
+
+### Pass two: write
+
+Walk the sorted index. Keep one Parquet writer open per partition, created on
+first use. For each record:
+
+1. Seek to its byte offset and re-read the one line.
+2. Parse the resource again, this time keeping the geometry.
+3. Validate the polygon, compute the representative point, encode to WKB.
+4. Build the row and append it to the partition's current batch.
+5. Release the geometry.
+
+Batches flush to a row group at the configured size. The one check that needs
+two geometries at once, a point outside its parent's polygon, fetches the
+parent by seeking to *its* offset; parents are few and checked repeatedly, so
+a small cache of parent polygons is kept, bounded by count.
+
+Peak memory is the index plus one batch per open partition plus the parent
+cache. It does not grow with polygon size. The cost is reading the file twice,
+and the second read is in sorted order rather than file order, so it is
+seek-heavy. On an SSD this is invisible. On a spinning disk it is still far
+cheaper than swapping.
+
+### Atomic output
+
+Each partition is written to a temporary file and renamed into place. The
+whole dataset directory is then swapped in one rename, with the previous
+dataset kept as a backup until the swap completes. A crash at any point
+leaves either the old dataset or the new one, never a mixture and never a
+truncated file that a reader might mistake for a complete one.
+
+### Geometry handling
+
+GeoJSON is parsed with the `geojson` crate into `geo` types. Validity is
+checked and reported. It is **not** repaired: a self intersecting ward
+boundary is a registry problem, and silently fixing it would hide that from
+the people who need to know. The representative point is a `geo` interior
+point. WKB is encoded directly. There is no GEOS and no GDAL anywhere in the
+binary.
+
+---
+
+## Round trip: diff and load
+
+Editing happens in GIS tools because that is where the good editing tools are.
+QGIS can move a point, redraw a boundary, or edit a name in a table view, and
+it can do it against the kiln parquet loaded as a layer. What it cannot do is
+talk FHIR. `diff` and `load` close that gap.
+
+### diff
+
+```
+kiln diff --snapshot snapshot/ --in edits.geojson --out changes.ndjson
+```
+
+Input is GeoJSON or GeoParquet, detected by extension, with an `id` column.
+GeoJSON is what QGIS exports most naturally; GeoParquet suits DuckDB and
+Python users. Rows with no `id` are treated as new Locations, given a
+generated id, and reported.
+
+For each row, diff finds the snapshot resource by id and rebuilds what the
+resource *should* now be:
+
+1. Start from the snapshot's full resource (`fhir_json`).
+2. Apply every **writable** column from the input on top of it: name, status,
+   identifiers, position, parent, and so on.
+3. If the input geometry differs from the snapshot geometry, replace the
+   boundary attachment. Comparison is on the WKB after rounding coordinates
+   to seven decimals, so a float round trip through a GIS tool does not
+   register as an edit.
+4. Ignore every **derived** column. A stale `admin1_name` in the input never
+   causes a change.
+5. Compare the rebuilt resource to the original. If nothing changed, skip it.
+
+What comes out is plain FHIR NDJSON containing only the resources that
+changed, each complete, each carrying the `meta.versionId` it was based on.
+You can inspect it, validate it against the profile, or hand it to someone
+else before anything is sent.
+
+### load
+
+```
+kiln load --server URL --token T --in changes.ndjson [--dry-run]
+```
+
+Load orders resources parents first, groups them into transaction bundles of
+`PUT Location/<id>`, and posts them with retry and backoff. Before the first
+bundle it checks the server's capability statement for update-as-create,
+because `PUT` to a new id needs it and one clear error beats hundreds of
+identical 404s.
+
+Every entry carries `If-Match` with the versionId from the snapshot. If the
+resource was changed on the server after the snapshot was taken, the server
+answers 412, kiln reports which ids conflicted, and nothing in that bundle is
+written. The fix is to extract again, re-apply the edit, and diff again. This
+is what makes it safe for a GIS user to edit a copy that might be a day old.
+
+`--dry-run` runs the preflight and prints the bundle plan without posting.
+
+Load does not update the snapshot. The server is the authority on what was
+stored; the next extract brings the snapshot up to date.
+
+### What is writable
+
+Only FHIR content is writable: the columns in the second group above. The
+hierarchy columns are computed and there is nothing to write them to. To move
+a facility to a different district, change `part_of`. To rename a state,
+change `name` on the state's row; every descendant's `admin1_name` will follow
+on the next transform.
+
+---
+
+## Reading the output
+
+The output is an ordinary GeoParquet dataset. Nothing about it is kiln
+specific once written.
+
+**DuckDB**, straight off the files, no extension needed for the geometry type:
+
+```sql
+SELECT admin1_name, count(*)
+FROM 'out/locations/**/*.parquet'
+WHERE type = 'facility'
+GROUP BY admin1_name;
+```
+
+With the spatial extension, spatial predicates prune row groups using the
+native statistics:
+
+```sql
+LOAD spatial;
+SELECT id, name
+FROM 'out/locations/**/*.parquet'
+WHERE ST_Intersects(geometry, ST_MakeEnvelope(3, 6, 4, 7));
+```
+
+A field kiln did not promote to a column is still reachable:
+
+```sql
+SELECT id, fhir_json->>'$.extension[0].url' FROM 'out/locations/**/*.parquet';
+```
+
+**QGIS** opens the directory or a single partition file as a vector layer.
+
+**GeoPandas** reads it with `read_parquet`.
+
+**Vector tiles.** kiln does not make tiles. Two paths that start from its
+output:
+
+- On demand: DuckDB's `ST_AsMVT` cuts a Mapbox Vector Tile per request from
+  the parquet, behind a tiny tile server or in the browser with DuckDB WASM.
+- Pre baked: tippecanoe over the polygon and point partitions produces a
+  PMTiles archive for fully static hosting.
+
+Both are a few lines of glue outside kiln, and both are rebuilt from the same
+parquet after every transform.
+
+---
+
+## Design decisions
+
+**FHIR is the master; parquet is a projection.** The parquet can always be
+rebuilt. It is never the source of truth and never edited in place as the
+record of what is true. This keeps FHIR's version history, references, and
+profile validation as the single authority.
+
+**Incremental extract, full transform.** Extract is incremental because
+network is the slow part. Transform is always full because the alternative is
+worse than it looks: renaming one state changes the derived columns of every
+row beneath it, so partial parquet updates would have to track change
+amplification through the hierarchy. A full transform from the snapshot is a
+sequential pass that takes seconds to minutes and has no such state.
+
+**Two passes over the snapshot instead of everything in memory.** Explained
+above. The design targets machines with a few gigabytes, and polygons are
+where the bytes are.
+
+**Native Parquet geometry type plus legacy metadata.** The native type gives
+readers per row group pruning. The GeoParquet 1.1 metadata and the `bbox`
+column keep older readers working. Writing both costs a few bytes per row.
+
+**Column names follow FHIR paths.** `status`, `part_of`,
+`position_longitude`, `identifier`. Someone who knows the resource can find
+the column, and someone who knows the column can find the field.
+
+**`fhir_json` in every row.** The projection is lossless. Whatever kiln does
+not model still survives, is still queryable, and still round trips.
+
+**Report, don't repair.** Invalid geometry, duplicate codes, broken chains are
+recorded and the run continues. Fixing them silently would hide registry
+problems from the people whose job is to fix them.
+
+**Version checked writes.** `If-Match` on every load is what makes editing a
+stale copy safe. Without it, a GIS user working from yesterday's export could
+overwrite today's server side correction without either party noticing.
+
+**Generic FHIR.** Standard search, standard paging, standard transaction
+bundles, standard `If-Match`. kiln has no dependency on any particular
+server's extensions, so the same binary works against HAPI, a hosted FHIR
+store, or anything else that implements R4.
+
+**No GDAL, no GEOS, no Python at runtime.** The deployment constraint drives
+this. Everything kiln needs from those libraries turned out to be available
+in pure Rust, at the cost of not offering geometry repair, which kiln did not
+want to offer anyway.
+
+---
+
+## What kiln does not do
+
+- **Make tiles.** See above. Tippecanoe and DuckDB do this well from kiln's
+  output.
+- **Repair geometry.** Reported, never fixed.
+- **Delete resources.** Retire them with `status = inactive`.
+- **Merge countries.** One snapshot and one dataset per country. Separate
+  outputs can be placed under one directory tree by hand, since the partition
+  key includes the country.
+- **Import external data.** Turning a GRID3 ward file or a CSV of facilities
+  into FHIR resources is the job of `bake` and `bake-points`, which remain in
+  the Python package under `python/` for now.
+- **Validate against the profile.** `diff` produces structurally correct
+  resources; running them through a FHIR validator before load is the
+  operator's call, and the NDJSON checkpoint exists so that is easy.
+
+---
+
+## Future extensions
+
+Things that fit the design and are not in it yet, roughly in the order they
+are likely to matter.
+
+**Change notifications.** Today extract is run on a schedule or by hand. A
+FHIR server that supports Subscriptions, or any outboard notification of
+resource changes, could trigger `kiln run` so the parquet is never more than a
+minute behind the registry. The watermark logic already supports this; only
+the trigger is missing.
+
+**Publishing.** A `--publish` target that copies the finished dataset to an
+object storage bucket after the atomic swap, so the whole pipeline is one
+command. Readers over HTTP would see either the old or the new dataset, never
+a partial one.
+
+**Multi country datasets.** Merge several snapshots into one dataset with
+`country` as the top level partition, for a regional or global view. The
+partition layout already accommodates it; what is missing is the merge
+command and a decision about how the report combines.
+
+**`bake` and `bake-points` in Rust.** Porting the import side of the Python
+kiln, so the whole toolkit is one binary. The GeoJSON and CSV parsing are
+straightforward; `--dissolve-parents` needs polygon union, which is available
+in pure Rust but is the piece to prototype first.
+
+**Tile baking as an optional step.** If a Rust tiler matures to the point of
+matching tippecanoe's generalisation quality, `kiln tiles` could become an
+optional subcommand. Until then, tippecanoe is the right tool and kiln stays
+out of the way.
+
+**Other resource types.** The same projection idea applies to any resource
+with a spatial or hierarchical shape: `Organization` hierarchies, `Group`
+households with a location, campaign `CarePlan` targets. The snapshot and
+transform machinery is resource agnostic; the column mapping is not, and each
+type would need its own.
+
+**Validation hook.** An optional call to a FHIR validator on `diff` output
+before `load`, so profile violations are caught locally rather than by the
+server.
+
+**Geometry repair as an explicit opt in.** If a deployment wants kiln to fix
+invalid polygons rather than report them, a `--repair` flag could do so. That
+would mean taking on GEOS or a pure Rust equivalent, and it would need to be
+clearly marked in the report which geometries were altered.
+
+---
+
+## Building
+
+Requires a stable Rust toolchain.
+
+```sh
+cargo build --release
+./target/release/kiln --help
+```
+
+Release binaries are built in CI for macOS (arm64, x86_64), Linux (x86_64 and
+aarch64, statically linked against musl) and Windows (x86_64), as single
+files with no runtime dependencies.
+
+Tests:
+
+```sh
+cargo test
+```
+
+Integration tests read the fixture snapshot under `tests/fixtures/`, run a
+transform, and verify the output with DuckDB, which must be on `PATH` for
+those tests only. DuckDB is never linked into kiln.
+
+---
+
+## Repository layout
+
+```
+kiln/
+  Cargo.toml
+  src/
+    main.rs, cli.rs
+    fhir/        Location parsing, profile extensions, NDJSON read and write
+    snapshot/    state.json, merge by id, watermark
+    extract/     FHIR client, paging, boundary fetch, boundary cache
+    index/       the pass one record, hierarchy, Hilbert key, partition choice
+    geometry/    GeoJSON parse, validity, interior point, WKB
+    write/       Parquet writers, geo metadata, atomic swap
+    report.rs
+    diff/        GeoJSON and GeoParquet readers, resource reconstruction
+    load/        bundles, If-Match, capability preflight, retry
+  tests/
+    fixtures/
+  python/        the Python package: bake and bake-points
+  docs/
+    superpowers/ design specs, plans, and spikes
+```
