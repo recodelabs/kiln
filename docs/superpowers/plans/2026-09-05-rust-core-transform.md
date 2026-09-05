@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].offset, 0);
         assert_eq!(lines[0].text, "{\"id\":\"a\"}");
-        assert_eq!(lines[1].offset, 11);
+        assert_eq!(lines[1].offset, 12);
         assert_eq!(lines[1].len, 10);
     }
 
