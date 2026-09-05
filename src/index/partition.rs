@@ -54,9 +54,11 @@ pub fn parse_keys(spec: &str) -> Result<Vec<PartitionKey>> {
             "geom_type" => PartitionKey::GeomType,
             "tier" => PartitionKey::Tier,
             "type" => PartitionKey::Type,
-            other => return Err(KilnError::Usage(format!(
+            other => {
+                return Err(KilnError::Usage(format!(
                 "--partition-by: unknown key {other:?}; available: country, geom_type, tier, type"
-            ))),
+            )))
+            }
         };
         if !seen.insert(trimmed) {
             return Err(KilnError::Usage(format!(
@@ -86,8 +88,10 @@ const RESERVED_WINDOWS_NAMES: [&str; 22] = [
 /// the other characters Windows forbids in a filename, and every remaining
 /// control character become `_`; trailing dots and spaces (which Windows
 /// silently strips) are trimmed; a result that collides with a reserved
-/// Windows device name (case-insensitively, ignoring anything from the
-/// first `.` on) gets a trailing `_`. An empty result becomes `"empty"`.
+/// Windows device name (case-insensitively, looking only at the portion
+/// before the first `.` -- Windows reserves `CON.txt` exactly as it
+/// reserves bare `CON`) gets a `_` appended to that base portion, e.g.
+/// `CON.txt` -> `CON_.txt`. An empty result becomes `"empty"`.
 fn sanitize(value: &str) -> (String, bool) {
     let mut result: String = value
         .chars()
@@ -103,12 +107,12 @@ fn sanitize(value: &str) -> (String, bool) {
         result.pop();
     }
 
-    let base = result.split('.').next().unwrap_or("");
+    let base_end = result.find('.').unwrap_or(result.len());
     if RESERVED_WINDOWS_NAMES
         .iter()
-        .any(|name| name.eq_ignore_ascii_case(base))
+        .any(|name| name.eq_ignore_ascii_case(&result[..base_end]))
     {
-        result.push('_');
+        result.insert(base_end, '_');
     }
 
     if result.is_empty() {
@@ -297,6 +301,14 @@ mod tests {
         let mut report = Report::default();
         let mut claims = Claims::default();
         assert_eq!(segment("country", "CON", &mut claims, &mut report), "CON_");
+        assert_eq!(report.count("partition_value_sanitized"), 1);
+
+        let mut report = Report::default();
+        let mut claims = Claims::default();
+        assert_eq!(
+            segment("country", "CON.txt", &mut claims, &mut report),
+            "CON_.txt"
+        );
         assert_eq!(report.count("partition_value_sanitized"), 1);
 
         let mut report = Report::default();
