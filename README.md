@@ -11,11 +11,13 @@ projection of it.
 It ships as a single static binary with no runtime dependencies: no Python, no
 GDAL, no database. It is designed to run on a laptop in a district office.
 
-> **Status.** This README describes the Rust rewrite of kiln, which is being
-> built now. The current Python implementation, which the rewrite replaces for
-> the export and load paths, is documented in [README-python.md](README-python.md).
-> The Python `bake` and `bake-points` commands (GeoJSON and CSV into FHIR) stay
-> in Python for now and live under `python/`.
+> **Status.** `transform` and `inspect` are implemented in Rust and are what
+> this README describes. `extract`, `diff` and `load` are in progress. Until
+> they land, the Python package under `python/` still provides `extract`,
+> `bake`, `bake-points` and `load`; it is documented in
+> [python/README.md](python/README.md). Its `extract` writes a single NDJSON
+> file, which is exactly what `kiln transform --snapshot DIR` expects to find
+> as `DIR/locations.ndjson`.
 
 ---
 
@@ -684,8 +686,28 @@ cargo test
 ```
 
 Integration tests read the fixture snapshot under `tests/fixtures/`, run a
-transform, and verify the output with DuckDB, which must be on `PATH` for
-those tests only. DuckDB is never linked into kiln.
+transform, and verify the output with DuckDB when it is on `PATH`; they skip
+that check otherwise. DuckDB is never linked into kiln.
+
+A synthetic country can be generated for timing (one country, 20 states, 400
+districts as 200-vertex polygons, and `KILN_BENCH_FACILITIES` facilities,
+default 200,000):
+
+```sh
+cargo test --release --test generate_snapshot -- --ignored --nocapture
+./target/release/kiln transform --snapshot target/bench/snapshot --out target/bench/out
+```
+
+Measured on an Apple Silicon laptop, single runs, release build:
+
+| facilities | snapshot | wall time | peak memory |
+|---|---|---|---|
+| 200,000 | 60 MB | 2.0 s | 161 MB |
+| 1,000,000 | 291 MB | 8.6 s | 568 MB |
+
+The synthetic data is a best case: two partitions, thin records, and circular
+polygons without holes. Real registries with detailed ward boundaries will be
+slower per row, mostly in boundary parsing.
 
 ---
 
