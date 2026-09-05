@@ -2219,7 +2219,7 @@ git commit -m "Pass one: build the sorted Location index from a snapshot"
 - Create: `src/write/mod.rs`, `src/write/schema.rs`
 - Modify: `src/main.rs` (add `mod write;`)
 
-- [ ] **Step 1: Create src/write/mod.rs**
+- [x] **Step 1: Create src/write/mod.rs**
 
 ```rust
 pub mod dataset;
@@ -2229,7 +2229,7 @@ pub mod schema;
 
 (Create empty `dataset.rs` and `parquet.rs` so it compiles.) Add `mod write;` to `src/main.rs`.
 
-- [ ] **Step 2: Write the failing tests in src/write/schema.rs**
+- [x] **Step 2: Write the failing tests in src/write/schema.rs**
 
 ```rust
 #[cfg(test)]
@@ -2285,7 +2285,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Implement the schema, OutputRow and RowBatch**
+- [x] **Step 3: Implement the schema, OutputRow and RowBatch**
 
 ```rust
 //! The output table: Arrow schema, the row struct pass two fills, and the
@@ -2630,12 +2630,12 @@ impl Default for RowBatch {
 
 The list child field name is `item` and nullable, which is what `ListBuilder` produces; if `RecordBatch::try_new` reports a schema mismatch on a list column, compare the builder's field against the schema's and align the schema, not the builder.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test write::schema`
 Expected: 2 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/write src/main.rs
