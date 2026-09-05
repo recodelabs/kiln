@@ -1,9 +1,14 @@
 //! Hilbert curve key for spatial clustering of rows within a partition.
-//! Classic xy2d on a 2^ORDER grid over the dataset extent.
+//! Classic xy2d on a 2^ORDER grid over the caller-supplied extent.
 
 pub const ORDER: u32 = 16;
 
-/// `point` is (x, y); `extent` is [xmin, ymin, xmax, ymax] of the whole dataset.
+/// `point` is (x, y); `extent` is the [xmin, ymin, xmax, ymax] the caller
+/// wants `point` scaled against. This function is extent-agnostic: it has
+/// no notion of a dataset's own bounds. `build_index` (see `HILBERT_EXTENT`
+/// in `src/index/build.rs`) always passes a fixed WGS84 extent so that
+/// keys are comparable across partitions and runs, rather than a
+/// per-dataset bounding box.
 ///
 /// Coordinates are expected to be finite; a NaN coordinate maps to the
 /// origin rather than panicking. The extent's endpoints map exactly onto

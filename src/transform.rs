@@ -12,6 +12,12 @@ use crate::write::dataset::write_dataset;
 pub const SNAPSHOT_FILE: &str = "locations.ndjson";
 
 pub fn run_transform(args: &TransformArgs) -> Result<()> {
+    if args.out.exists() && !args.out.is_dir() {
+        return Err(KilnError::Usage(format!(
+            "--out {}: not a directory",
+            args.out.display()
+        )));
+    }
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
         return Err(KilnError::Usage(format!(
@@ -60,6 +66,7 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
 }
 
 pub fn write_report(path: &Path, report: &Report) -> Result<()> {
-    let text = serde_json::to_string_pretty(&report.to_json())?;
+    let mut text = serde_json::to_string_pretty(&report.to_json())?;
+    text.push('\n');
     std::fs::write(path, text).map_err(|e| KilnError::io(path, e))
 }

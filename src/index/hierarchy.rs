@@ -236,6 +236,16 @@ fn propagate(
             admin_count += 1;
             if (admin_count as usize) <= ADMIN_COLUMNS {
                 admin_arr[(admin_count - 1) as usize] = Some(NodeIdx::new(idx));
+            } else {
+                report.add(
+                    "admin_level_beyond_columns",
+                    &rec.id,
+                    &format!(
+                        "admin level {} is beyond the {ADMIN_COLUMNS} admin columns; \
+                         not present in adminN_name/adminN_code",
+                        admin_count - 1
+                    ),
+                );
             }
         }
         let admin_level = admin.then(|| (admin_count - 1) as i8);
@@ -502,6 +512,41 @@ mod tests {
 
         let ng = idx(&recs, "ng");
         assert_eq!(h.get(ng).unwrap().depth, 0);
+    }
+
+    #[test]
+    fn admin_levels_beyond_admin_columns_are_reported_once_each() {
+        // A 7-level admin chain: levels 0..4 fit in ADMIN_COLUMNS=5, levels
+        // 5 and 6 don't and must each be reported exactly once.
+        let mut recs = vec![rec("l0", None, "admin-unit", Some("L0"))];
+        for i in 1..7 {
+            recs.push(rec(
+                &format!("l{i}"),
+                Some(&format!("l{}", i - 1)),
+                "admin-unit",
+                None,
+            ));
+        }
+        let mut report = Report::default();
+        let h = resolve_hierarchy(&recs, &mut report);
+
+        assert_eq!(report.count("admin_level_beyond_columns"), 2);
+        let flagged: BTreeSet<&str> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == "admin_level_beyond_columns")
+            .map(|issue| issue.location_id.as_str())
+            .collect();
+        assert_eq!(flagged, BTreeSet::from(["l5", "l6"]));
+
+        for i in 0..5 {
+            let n = idx(&recs, &format!("l{i}"));
+            assert_eq!(h.get(n).unwrap().admin_level, Some(i as i8));
+        }
+        for i in 5..7 {
+            let n = idx(&recs, &format!("l{i}"));
+            assert_eq!(h.get(n).unwrap().admin_level, Some(i as i8));
+        }
     }
 
     #[test]

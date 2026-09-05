@@ -67,6 +67,23 @@ fn transform_rejects_bad_partition_key_with_exit_2() {
 }
 
 #[test]
+fn transform_rejects_an_out_path_that_is_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let out_file = dir.path().join("not-a-dir");
+    std::fs::write(&out_file, "not a directory").unwrap();
+    Command::cargo_bin("kiln")
+        .unwrap()
+        .args(["transform", "--snapshot"])
+        .arg(fixture_snapshot())
+        .arg("--out")
+        .arg(&out_file)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicates::str::contains("--out"));
+}
+
+#[test]
 fn a_stale_report_is_replaced() {
     let out = tempfile::tempdir().unwrap();
     std::fs::write(out.path().join("_report.json"), "stale").unwrap();
