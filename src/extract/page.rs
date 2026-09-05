@@ -6,9 +6,10 @@ use std::io::Write;
 use std::path::Path;
 
 use serde_json::Value;
+use url::Url;
 
 use crate::error::{KilnError, Result};
-use crate::extract::client::FhirClient;
+use crate::extract::client::{FetchError, FhirClient};
 use crate::fhir::location::BOUNDARY_EXTENSION_URLS;
 use crate::report::Report;
 
@@ -76,12 +77,15 @@ pub fn page_locations(
     incoming: &Path,
     report: &mut Report,
 ) -> Result<PageResult> {
-    let mut url = format!(
-        "{}/Location?_count={PAGE_SIZE}",
-        server.trim_end_matches('/')
-    );
-    if let Some(s) = since {
-        url.push_str(&format!("&_lastUpdated=ge{s}"));
+    let base = server.trim_end_matches('/');
+    let mut url = Url::parse(&format!("{base}/Location"))
+        .map_err(|_| KilnError::Usage(format!("--server is not a valid URL: {server}")))?;
+    {
+        let mut qp = url.query_pairs_mut();
+        qp.append_pair("_count", &PAGE_SIZE.to_string());
+        if let Some(s) = since {
+            qp.append_pair("_lastUpdated", &format!("ge{s}"));
+        }
     }
     if let Some(parent) = incoming.parent() {
         std::fs::create_dir_all(parent).map_err(|e| KilnError::io(parent, e))?;
@@ -93,22 +97,28 @@ pub fn page_locations(
     let mut pages = 0usize;
 
     loop {
-        if !seen.insert(url.clone()) {
+        let current = url.to_string();
+        if !seen.insert(current.clone()) {
             return Err(KilnError::Environment(format!(
-                "cyclic pagination: the server repeated the next link {url}"
+                "cyclic pagination: the server repeated the next link {current}"
             )));
         }
         if pages >= MAX_PAGES {
             return Err(KilnError::Environment(format!(
-                "more than {MAX_PAGES} pages; the server's pagination looks broken"
+                "more than {MAX_PAGES} pages ({} resources so far); the server's pagination looks broken or _count is being ignored",
+                notes.len()
             )));
         }
-        let fetched = client
-            .get(&url)
-            .map_err(|e| KilnError::Environment(format!("fetching {url}: {e}")))?;
+        let fetched = client.get(&current).map_err(|e| {
+            if matches!(e, FetchError::Transport(_)) {
+                KilnError::Environment(e.to_string())
+            } else {
+                KilnError::Environment(format!("fetching {current}: {e}"))
+            }
+        })?;
         pages += 1;
         let bundle: Value = serde_json::from_slice(&fetched.body)
-            .map_err(|e| KilnError::Environment(format!("{url}: response is not JSON: {e}")))?;
+            .map_err(|e| KilnError::Environment(format!("{current}: response is not JSON: {e}")))?;
         for (i, entry) in bundle
             .get("entry")
             .and_then(Value::as_array)
@@ -144,12 +154,21 @@ pub fn page_locations(
                     .map(str::to_string),
                 boundary_url: boundary_url(resource),
             });
-            serde_json::to_writer(&mut out, resource)?;
+            serde_json::to_writer(&mut out, resource).map_err(|e| match e.io_error_kind() {
+                Some(kind) => KilnError::io(incoming, std::io::Error::from(kind)),
+                None => KilnError::Json(e),
+            })?;
             out.write_all(b"\n")
                 .map_err(|e| KilnError::io(incoming, e))?;
         }
         match next_link(&bundle) {
-            Some(next) => url = next,
+            Some(next) => {
+                url = url.join(&next).map_err(|_| {
+                    KilnError::Environment(format!(
+                        "the server's next link could not be resolved ({next})"
+                    ))
+                })?;
+            }
             None => break,
         }
     }
@@ -347,5 +366,104 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not JSON"), "{err}");
+    }
+
+    #[test]
+    fn since_with_an_offset_is_percent_encoded() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Location"),
+                request::query(url_decoded(contains((
+                    "_lastUpdated",
+                    "ge2026-01-01T00:00:00+01:00"
+                ))))
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(bundle(&[], None))),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        page_locations(
+            &client(),
+            &server.url("/fhir").to_string(),
+            Some("2026-01-01T00:00:00+01:00"),
+            &dir.path().join("i"),
+            &mut Report::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_relative_next_link_is_resolved() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Location"),
+                request::query(url_decoded(contains(("_count", "1000"))))
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(bundle(
+                &[loc("a", "2026-01-01T00:00:00Z", None)],
+                Some("/fhir/Location?page=2"),
+            ))),
+        );
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Location"),
+                request::query(url_decoded(contains(("page", "2"))))
+            ])
+            .times(1)
+            .respond_with(status_code(200).body(bundle(&[], None))),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let res = page_locations(
+            &client(),
+            &server.url("/fhir").to_string(),
+            None,
+            &dir.path().join("i"),
+            &mut Report::default(),
+        )
+        .unwrap();
+        assert_eq!(res.pages, 2);
+        assert_eq!(res.notes.len(), 1);
+    }
+
+    #[test]
+    fn an_existing_incoming_file_is_truncated() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Location")).respond_with(
+                status_code(200).body(bundle(&[loc("a", "2026-01-01T00:00:00Z", None)], None)),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("i");
+        std::fs::write(&out, "leftover junk from a previous run\nmore junk\n").unwrap();
+        page_locations(
+            &client(),
+            &server.url("/fhir").to_string(),
+            None,
+            &out,
+            &mut Report::default(),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+    }
+
+    #[test]
+    fn next_link_ignores_an_empty_url() {
+        let b = bundle(&[], Some(""));
+        let parsed: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(next_link(&parsed), None);
+    }
+
+    #[test]
+    fn a_boundary_extension_without_attachment_is_skipped_for_the_next_one() {
+        let r = serde_json::json!({"extension":[
+            {"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"},
+            {"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson","valueAttachment":{"url":"https://x"}}
+        ]});
+        assert_eq!(boundary_url(&r).as_deref(), Some("https://x"));
     }
 }
