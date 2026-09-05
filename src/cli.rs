@@ -6,7 +6,11 @@ pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
 pub const DEFAULT_PARTITION_BY: &str = "country,geom_type";
 
 #[derive(Parser, Debug)]
-#[command(name = "kiln", version, about = "Bridge between a FHIR Location registry and GeoParquet")]
+#[command(
+    name = "kiln",
+    version,
+    about = "Bridge between a FHIR Location registry and GeoParquet"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

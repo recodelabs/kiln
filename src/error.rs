@@ -23,7 +23,10 @@ pub enum KilnError {
 
 impl KilnError {
     pub fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
-        KilnError::Io { path: path.into(), source }
+        KilnError::Io {
+            path: path.into(),
+            source,
+        }
     }
 
     /// Exit status: 2 for operator-fixable problems, 1 for everything else.

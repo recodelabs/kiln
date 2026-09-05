@@ -77,7 +77,7 @@ Each `mod.rs` only declares submodules and re-exports; logic lives in named file
 - Create: `Cargo.toml`, `src/main.rs`, `src/cli.rs`, `src/error.rs`, `tests/fixtures/snapshot/locations.ndjson`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Move the Python package**
+- [x] **Step 1: Move the Python package**
 
 ```bash
 cd /Users/mberg/github/kiln
@@ -89,19 +89,19 @@ git mv README-python.md python/README.md
 rm -rf .venv
 ```
 
-- [ ] **Step 2: Verify the Python tests still pass from their new home**
+- [x] **Step 2: Verify the Python tests still pass from their new home**
 
 Run: `cd python && uv sync && uv run pytest -q; cd ..`
 Expected: all tests pass (the suite locates fixtures relative to the test file, so the move is transparent). If `test_cli` fails on GDAL probing, that is the pre-existing GDAL requirement, not the move; run `uv run pytest -q --deselect python/tests/test_cli.py` and note it.
 
-- [ ] **Step 3: Copy the fixture into the Rust test tree**
+- [x] **Step 3: Copy the fixture into the Rust test tree**
 
 ```bash
 mkdir -p tests/fixtures/snapshot
 cp python/tests/fixtures/locations.ndjson tests/fixtures/snapshot/locations.ndjson
 ```
 
-- [ ] **Step 4: Create Cargo.toml**
+- [x] **Step 4: Create Cargo.toml**
 
 ```toml
 [package]
@@ -140,7 +140,7 @@ codegen-units = 1
 strip = true
 ```
 
-- [ ] **Step 5: Create src/error.rs**
+- [x] **Step 5: Create src/error.rs**
 
 ```rust
 //! One error type for the whole binary. `Usage` is anything the operator can
@@ -183,7 +183,7 @@ impl KilnError {
 pub type Result<T> = std::result::Result<T, KilnError>;
 ```
 
-- [ ] **Step 6: Create src/cli.rs with the two commands this plan delivers**
+- [x] **Step 6: Create src/cli.rs with the two commands this plan delivers**
 
 ```rust
 use std::path::PathBuf;
@@ -235,7 +235,7 @@ pub struct InspectArgs {
 }
 ```
 
-- [ ] **Step 7: Create src/main.rs**
+- [x] **Step 7: Create src/main.rs**
 
 ```rust
 mod cli;
@@ -256,7 +256,7 @@ fn main() {
 }
 ```
 
-- [ ] **Step 8: Add target to .gitignore and build**
+- [x] **Step 8: Add target to .gitignore and build**
 
 Append to `.gitignore`:
 
@@ -267,7 +267,7 @@ Append to `.gitignore`:
 Run: `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"; cargo build 2>&1 | tail -3 && ./target/debug/kiln --help`
 Expected: builds; help lists `transform` and `inspect`.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add -A
