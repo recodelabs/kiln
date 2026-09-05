@@ -48,7 +48,7 @@ tests/
 
 **Files:** `Cargo.toml`, `src/cli.rs`, `src/main.rs`
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 In `[dependencies]`:
 ```toml
@@ -59,7 +59,7 @@ In `[dev-dependencies]`:
 httptest = "0.16"
 ```
 
-- [ ] **Step 2: Add the argument structs to src/cli.rs**
+- [x] **Step 2: Add the argument structs to src/cli.rs**
 
 ```rust
 pub const DEFAULT_CONCURRENCY: usize = 8;
@@ -142,13 +142,13 @@ Add to `Command`:
     Run(RunArgs),
 ```
 
-- [ ] **Step 3: Stub the commands in src/main.rs**
+- [x] **Step 3: Stub the commands in src/main.rs**
 
 Add `mod extract; mod run; mod snapshot;` once those modules exist (Tasks 1 and 7 create them; until then wire the arms to `Err(KilnError::Usage("extract: not implemented yet".into()))` so the crate builds).
 
-- [ ] **Step 4: Verify** `cargo build`, `kiln extract --help` lists every flag, `kiln run --help` lists both sets. `cargo clippy --all-targets -- -D warnings` (unused `RunArgs::transform_args` is dead until Task 8; if it warns, call it from the stub arm: `let _ = args.transform_args();`).
+- [x] **Step 4: Verify** `cargo build`, `kiln extract --help` lists every flag, `kiln run --help` lists both sets. `cargo clippy --all-targets -- -D warnings` (unused `RunArgs::transform_args` is dead until Task 8; if it warns, call it from the stub arm: `let _ = args.transform_args();`).
 
-- [ ] **Step 5: Commit** `git commit -m "Add extract and run argument surface; add reqwest and httptest"`
+- [x] **Step 5: Commit** `git commit -m "Add extract and run argument surface; add reqwest and httptest"`
 
 ---
 
