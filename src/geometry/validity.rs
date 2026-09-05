@@ -8,16 +8,18 @@
 //!
 //! Only ring-level structure is checked: minimum distinct points, and
 //! self-intersection, for the exterior ring and every interior (hole) ring.
-//! Whether a hole actually lies inside its exterior, and whether holes
-//! overlap each other, is deliberately NOT checked here -- that would need
-//! a second, more expensive geometric pass, and kiln's job is to report
-//! registry problems, not to silently decide which ones matter.
+//! Whether a hole actually lies inside its exterior, whether holes overlap
+//! each other, and whether the parts of a MultiPolygon overlap (a
+//! multi-feature fold can produce this) is deliberately NOT checked here --
+//! that would need a second, more expensive geometric pass, and kiln's job
+//! is to report registry problems, not to silently decide which ones
+//! matter. This is stricter than `geo`'s own `Validation` in one respect:
+//! an empty interior ring is reported as having fewer than 3 distinct
+//! points rather than skipped.
 //!
 //! Non-finite coordinates (NaN, +-inf) cannot occur: geometry is parsed
 //! from GeoJSON via `serde_json`, which rejects out-of-range numbers at
 //! parse time.
-
-use std::iter::FromIterator;
 
 use geo::{Coord, Line, LineString, MultiPolygon, Polygon};
 
@@ -70,7 +72,7 @@ fn check_ring(ls: &LineString<f64>, interior_index: Option<usize>) -> Result<(),
 /// all-pairs comparison would cost on a large ring.
 fn count_distinct(coords: &[Coord<f64>]) -> usize {
     let mut pts: Vec<(f64, f64)> = coords.iter().map(|c| (c.x, c.y)).collect();
-    pts.sort_by(|a, b| a.partial_cmp(b).expect("coordinates are finite"));
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     pts.dedup();
     pts.len()
 }

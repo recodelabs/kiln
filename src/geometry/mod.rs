@@ -120,16 +120,21 @@ pub fn summarize(loc: &Location, report: &mut Report) -> Option<GeometrySummary>
                 &format!("{reason}; written as is"),
             );
         }
-        if let Some((lon, lat)) = loc.position {
-            // `Intersects` (not `Contains`) so a position exactly on the
-            // boundary still counts as inside.
-            if !geom.intersects(&geo::Point::new(lon, lat)) {
-                report.add(
-                    "position_outside_boundary",
-                    &loc.id,
-                    &format!("position ({lon}, {lat}) falls outside the Location's own boundary"),
-                );
-            }
+    }
+
+    // Checked for both kinds: a Point boundary can also disagree with the
+    // FHIR position. `Intersects` (not `Contains`) so a position exactly on
+    // a polygon's boundary still counts as inside; for a Point boundary,
+    // `Intersects` is exact coordinate equality. The position-only path in
+    // `classify` synthesises the geometry from the position itself, so it
+    // can never false-positive here.
+    if let Some((lon, lat)) = loc.position {
+        if !geom.intersects(&geo::Point::new(lon, lat)) {
+            report.add(
+                "position_outside_boundary",
+                &loc.id,
+                &format!("position ({lon}, {lat}) falls outside the Location's own boundary"),
+            );
         }
     }
 
@@ -341,6 +346,20 @@ mod tests {
         let mut r = Report::default();
         summarize(&loc(Some((3.5, 6.5)), Some(SQUARE)), &mut r).unwrap();
         assert_eq!(r.count("position_outside_boundary"), 0);
+    }
+
+    #[test]
+    fn point_boundary_disagreeing_with_position_is_reported() {
+        let mut r = Report::default();
+        summarize(
+            &loc(
+                Some((5.0, 6.0)),
+                Some(r#"{"type":"Point","coordinates":[1,2]}"#),
+            ),
+            &mut r,
+        )
+        .unwrap();
+        assert_eq!(r.count("position_outside_boundary"), 1);
     }
 
     #[test]
