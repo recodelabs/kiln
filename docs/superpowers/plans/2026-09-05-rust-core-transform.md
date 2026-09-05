@@ -3151,7 +3151,7 @@ git commit -m "Pass two: stream rows into per-partition writers and swap in atom
 - Create: `src/transform.rs`
 - Modify: `src/main.rs`
 
-- [ ] **Step 1: Write the integration test tests/transform.rs**
+- [x] **Step 1: Write the integration test tests/transform.rs**
 
 ```rust
 use std::path::Path;
@@ -3224,12 +3224,12 @@ fn duckdb_reads_the_output_when_available() {
 
 Add `serde_json` is already a dependency; `tempfile` and `assert_cmd` are dev-dependencies from Task 0.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test --test transform 2>&1 | tail -5`
 Expected: `transform_writes_dataset_and_report` fails with "not implemented yet".
 
-- [ ] **Step 3: Implement src/transform.rs**
+- [x] **Step 3: Implement src/transform.rs**
 
 ```rust
 //! `kiln transform`: pass one, pass two, report.
@@ -3309,17 +3309,17 @@ fn main() {
 
 `inspect` is Task 14; until then keep the `Inspect` arm returning the "not implemented" usage error and omit `mod inspect;`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --test transform`
 Expected: 3 passed (the DuckDB test runs since DuckDB 1.5.5 is installed on this machine).
 
-- [ ] **Step 5: Run the whole suite and clippy**
+- [x] **Step 5: Run the whole suite and clippy**
 
 Run: `cargo test && cargo clippy --all-targets -- -D warnings`
 Expected: all pass, no warnings. Fix any clippy findings inline.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/transform.rs src/main.rs tests/transform.rs
