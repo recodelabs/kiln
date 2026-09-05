@@ -246,6 +246,11 @@ impl RowBatch {
         }
     }
 
+    /// The schema `finish` builds record batches against.
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
     pub fn push(&mut self, r: &OutputRow) {
         self.id.append_value(&r.id);
         self.version_id.append_option(r.version_id.as_deref());
@@ -304,7 +309,11 @@ impl RowBatch {
         self.geom_type.append_value(&r.geom_type);
         self.lon.append_value(r.lon);
         self.lat.append_value(r.lat);
-        self.geometry.append_value(&r.wkb);
+        if r.wkb.is_empty() {
+            self.geometry.append_null();
+        } else {
+            self.geometry.append_value(&r.wkb);
+        }
         for (i, v) in r.bbox.iter().enumerate() {
             self.bbox
                 .field_builder::<Float64Builder>(i)
@@ -460,9 +469,83 @@ mod tests {
             .downcast_ref::<arrow_array::StringArray>()
             .unwrap();
         assert!(systems.is_null(1), "a missing identifier.system stays null");
-        // A second push after finish works.
+        // A second push after finish works, and the reused StructBuilder
+        // still produces the right values (not stale ones from the first
+        // finish, and not shifted into the wrong slot).
         batch.push(&row);
-        assert_eq!(batch.finish().unwrap().num_rows(), 1);
+        let rb2 = batch.finish().unwrap();
+        assert_eq!(rb2.num_rows(), 1);
+        let idents2 = rb2.column_by_name("identifier").unwrap();
+        let idents2 = idents2
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .unwrap();
+        let structs2 = idents2.value(0);
+        let structs2 = structs2
+            .as_any()
+            .downcast_ref::<arrow_array::StructArray>()
+            .unwrap();
+        let systems2 = structs2
+            .column_by_name("system")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::StringArray>()
+            .unwrap();
+        assert_eq!(systems2.value(0), "sys");
+    }
+
+    #[test]
+    fn all_default_row_round_trips_with_null_geometry() {
+        let mut batch = RowBatch::new();
+        batch.push(&OutputRow::default());
+        let rb = batch.finish().unwrap();
+        assert_eq!(rb.num_rows(), 1);
+        let geometry = rb
+            .column_by_name("geometry")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::BinaryArray>()
+            .unwrap();
+        assert!(
+            geometry.is_null(0),
+            "an empty wkb must land as a null geometry, not a zero-length value"
+        );
+        let lon = rb
+            .column_by_name("lon")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::Float64Array>()
+            .unwrap();
+        assert_eq!(lon.value(0), 0.0);
+    }
+
+    #[test]
+    fn bbox_values_land_in_the_right_slots() {
+        let mut batch = RowBatch::new();
+        let row = OutputRow {
+            bbox: [1.0, 2.0, 3.0, 4.0],
+            ..Default::default()
+        };
+        batch.push(&row);
+        let rb = batch.finish().unwrap();
+        let bbox = rb
+            .column_by_name("bbox")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow_array::StructArray>()
+            .unwrap();
+        let field = |name: &str| {
+            bbox.column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::Float64Array>()
+                .unwrap()
+                .value(0)
+        };
+        assert_eq!(field("xmin"), 1.0);
+        assert_eq!(field("ymin"), 2.0);
+        assert_eq!(field("xmax"), 3.0);
+        assert_eq!(field("ymax"), 4.0);
     }
 
     #[test]
