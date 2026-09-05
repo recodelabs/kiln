@@ -442,7 +442,7 @@ git commit -m "Add Report with capped issue retention and exact counts"
 - Create: `src/fhir/mod.rs`, `src/fhir/location.rs`
 - Modify: `src/main.rs` (add `mod fhir;`)
 
-- [ ] **Step 1: Create the module file**
+- [x] **Step 1: Create the module file**
 
 `src/fhir/mod.rs`:
 
@@ -455,7 +455,7 @@ pub use location::{Boundary, Identifier, Location};
 
 (`ndjson` is created in Task 3; add `pub mod ndjson;` then. For now write only `pub mod location;` and the `pub use`.)
 
-- [ ] **Step 2: Write the failing tests in src/fhir/location.rs**
+- [x] **Step 2: Write the failing tests in src/fhir/location.rs**
 
 ```rust
 #[cfg(test)]
@@ -564,12 +564,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run tests to verify they fail**
+- [x] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test fhir::location 2>&1 | grep -E "^error" | head -3`
 Expected: compile errors (Location undefined).
 
-- [ ] **Step 4: Implement Location::parse above the tests**
+- [x] **Step 4: Implement Location::parse above the tests**
 
 ```rust
 //! One FHIR Location, flattened into the fields kiln models as columns, plus
@@ -842,12 +842,12 @@ impl Location {
 
 Add `mod fhir;` to `src/main.rs`.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test fhir::location`
 Expected: 5 passed. (If `base64` engine imports fail, the `use base64::Engine;` at the top brings the trait into scope; the test uses the fully qualified path.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/fhir src/main.rs
