@@ -761,7 +761,7 @@ Note: two workers racing on the same URL each write their own `tmp<pid>`-suffixe
 
 **Files:** `src/extract/page.rs`
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```rust
 #[cfg(test)]
@@ -842,7 +842,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 //! Phase one: walk the Location search and append every resource to the
@@ -960,9 +960,9 @@ pub fn page_locations(
 ```
 (exit code 1, i.e. the default arm) and `pub fn environment(msg: String) -> KilnError { KilnError::Environment(msg) }` in extract/mod.rs (or as an associated fn). Replace the `into_environment()` placeholder in the cyclic-pagination line with `return Err(environment(format!(..)))`.
 
-- [ ] **Step 3: Run** `cargo test extract::page` (4 passed).
+- [x] **Step 3: Run** `cargo test extract::page` (4 passed).
 
-- [ ] **Step 4: Commit** `git commit -m "Page the Location search into the incoming file"`
+- [x] **Step 4: Commit** `git commit -m "Page the Location search into the incoming file"`
 
 ---
 
