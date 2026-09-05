@@ -4,6 +4,7 @@
 pub mod instant;
 pub mod merge;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,7 @@ impl Snapshot {
         self.dir.join(LOCATIONS_FILE)
     }
     pub fn locations_tmp(&self) -> PathBuf {
-        self.dir.join("locations.ndjson.tmp")
+        self.dir.join(format!("{LOCATIONS_FILE}.tmp"))
     }
     pub fn state_path(&self) -> PathBuf {
         self.dir.join(STATE_FILE)
@@ -64,16 +65,42 @@ impl State {
                 KilnError::Usage(format!("{}: not a valid state file: {e}", path.display()))
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(KilnError::Usage(
+                format!("{}: not a valid state file: {e}", path.display()),
+            )),
             Err(e) => Err(KilnError::io(path, e)),
         }
     }
 
-    /// Atomic: write `state.json.tmp` then rename over `path`.
+    /// Atomic: write `state.json.tmp`, fsync it, then rename over `path`.
     pub fn write(&self, path: &Path) -> Result<()> {
         let tmp = path.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&tmp, text).map_err(|e| KilnError::io(&tmp, e))?;
-        std::fs::rename(&tmp, path).map_err(|e| KilnError::io(path, e))
+        let result: Result<()> = (|| {
+            let mut file = std::fs::File::create(&tmp).map_err(|e| KilnError::io(&tmp, e))?;
+            file.write_all(text.as_bytes())
+                .map_err(|e| KilnError::io(&tmp, e))?;
+            file.sync_all().map_err(|e| KilnError::io(&tmp, e))
+        })();
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(KilnError::io(path, e));
+        }
+        // Durability: fsync the directory whose entry (the state.json
+        // rename) just changed, so that change survives a crash right
+        // after this returns. Not every platform/filesystem supports
+        // fsync on a directory; that is a best-effort improvement, not
+        // something worth failing an otherwise-successful write over.
+        if let Some(parent) = path.parent() {
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -119,6 +146,7 @@ mod tests {
         state.write(&s.state_path()).unwrap();
         assert_eq!(State::read(&s.state_path()).unwrap().unwrap(), state);
         assert!(!dir.path().join("state.json.tmp").exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         let text = std::fs::read_to_string(s.state_path()).unwrap();
         assert!(text.ends_with('\n'));
     }

@@ -28,6 +28,10 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 }
 
 /// `YYYY-MM-DDThh:mm:ss[.fraction](Z|±hh:mm)` -> (unix seconds, nanoseconds).
+///
+/// A seconds field of 60 (a leap second) is deliberately accepted: this
+/// crate has no leap-second table, so it collapses into the following
+/// second rather than being rejected.
 pub fn parse_instant(s: &str) -> Option<(i64, u32)> {
     let b = s.as_bytes();
     if b.len() < 20
@@ -39,10 +43,26 @@ pub fn parse_instant(s: &str) -> Option<(i64, u32)> {
     {
         return None;
     }
-    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
-    let (y, mo, d) = (num(0..4)?, num(5..7)? as u32, num(8..10)? as u32);
-    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    // Every numeric field must be plain ASCII digits: `parse::<i64>` alone
+    // would also accept a leading `+`/`-` sign, which has no business
+    // inside a date/time component.
+    let digits = |r: std::ops::Range<usize>| -> Option<i64> {
+        let slice = s.get(r)?;
+        if slice.is_empty() || !slice.bytes().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        slice.parse::<i64>().ok()
+    };
+    let (y, mo, d) = (digits(0..4)?, digits(5..7)? as u32, digits(8..10)? as u32);
+    let (h, mi, sec) = (digits(11..13)?, digits(14..16)?, digits(17..19)?);
     if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    // Reject days that don't exist in their month (e.g. 2026-02-31, or
+    // 2026-02-29 in a non-leap year) by round-tripping through the
+    // civil-calendar conversion.
+    let days = days_from_civil(y, mo, d);
+    if civil_from_days(days) != (y, mo, d) {
         return None;
     }
     let mut i = 19;
@@ -56,16 +76,19 @@ pub fn parse_instant(s: &str) -> Option<(i64, u32)> {
         if end == start {
             return None;
         }
-        let digits = &s[start..end];
-        let scaled: String = format!("{digits:0<9}").chars().take(9).collect();
+        let frac_digits = &s[start..end];
+        let scaled: String = format!("{frac_digits:0<9}").chars().take(9).collect();
         nanos = scaled.parse().ok()?;
         i = end;
     }
     let offset = match b.get(i) {
         Some(b'Z') if i + 1 == b.len() => 0i64,
         Some(sign @ (b'+' | b'-')) if i + 6 == b.len() && b[i + 3] == b':' => {
-            let oh = num(i + 1..i + 3)?;
-            let om = num(i + 4..i + 6)?;
+            let oh = digits(i + 1..i + 3)?;
+            let om = digits(i + 4..i + 6)?;
+            if oh > 23 || om > 59 {
+                return None;
+            }
             let secs = oh * 3600 + om * 60;
             if *sign == b'+' {
                 secs
@@ -75,7 +98,6 @@ pub fn parse_instant(s: &str) -> Option<(i64, u32)> {
         }
         _ => return None,
     };
-    let days = days_from_civil(y, mo, d);
     Some((days * 86400 + h * 3600 + mi * 60 + sec - offset, nanos))
 }
 
@@ -90,6 +112,9 @@ pub fn later(current: Option<&str>, candidate: &str) -> Option<String> {
     }
 }
 
+/// Formats `t` as a FHIR `instant` in UTC. This is meant for "now"
+/// timestamps only: a time before the Unix epoch is clamped to
+/// `1970-01-01T00:00:00Z` rather than producing a negative date.
 pub fn format_utc(t: SystemTime) -> String {
     let secs = t
         .duration_since(UNIX_EPOCH)
@@ -121,6 +146,22 @@ mod tests {
             parse_instant("2026-01-02T04:04:05+01:00"),
             Some((1767323045, 0))
         );
+        assert_eq!(
+            parse_instant("2026-01-02T03:04:05-05:00"),
+            Some((1767341045, 0))
+        );
+        assert_eq!(parse_instant("2024-02-29T12:34:56Z"), Some((1709210096, 0)));
+        assert_eq!(parse_instant("1969-07-20T20:17:40Z"), Some((-14182940, 0)));
+        assert_eq!(
+            parse_instant("2026-01-02T03:04:05.5Z"),
+            Some((1767323045, 500_000_000))
+        );
+        assert_eq!(
+            parse_instant("2026-01-02T03:04:05.123456789Z"),
+            Some((1767323045, 123_456_789))
+        );
+        assert_eq!(parse_instant("2026-02-31T00:00:00Z"), None);
+        assert_eq!(parse_instant("2026-01-01T00:00:00+99:00"), None);
         assert_eq!(parse_instant("2026-01-02"), None);
         assert_eq!(parse_instant("garbage"), None);
     }
@@ -145,6 +186,11 @@ mod tests {
             Some("2026-01-01T00:00:00Z".to_string())
         );
         assert_eq!(later(None, "nope"), None);
+        assert_eq!(
+            later(Some("2026-01-01T00:00:00.1Z"), "2026-01-01T00:00:00.9Z"),
+            Some("2026-01-01T00:00:00.9Z".to_string()),
+            "equal seconds: the greater nanos wins"
+        );
     }
 
     #[test]
