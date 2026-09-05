@@ -67,7 +67,9 @@ pub struct Location {
     /// (longitude, latitude), FHIR order.
     pub position: Option<(f64, f64)>,
     pub boundary: Option<Boundary>,
-    /// The resource as compact JSON with the boundary extension removed.
+    /// The resource as JSON (key order preserved) with the captured boundary
+    /// extension removed; everything else, including any boundary extension
+    /// that was NOT captured into `boundary`, is kept verbatim.
     pub fhir_json: String,
 }
 
@@ -75,13 +77,15 @@ fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> 
     obj.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// `Location/loc-1` -> `loc-1`; bare ids pass through.
-fn strip_reference(reference: &str) -> String {
-    reference
-        .rsplit('/')
-        .next()
-        .unwrap_or(reference)
-        .to_string()
+/// `Location/loc-1` -> `loc-1`; bare ids pass through. An empty reference, or
+/// one ending in `/`, has no usable id and yields `None`.
+fn strip_reference(reference: &str) -> Option<String> {
+    let last = reference.rsplit('/').next().unwrap_or(reference);
+    if last.is_empty() {
+        None
+    } else {
+        Some(last.to_string())
+    }
 }
 
 fn reference_id(
@@ -92,10 +96,16 @@ fn reference_id(
 ) -> Option<String> {
     match obj.get(key) {
         None | Some(Value::Null) => None,
-        Some(Value::Object(r)) => r
-            .get("reference")
-            .and_then(Value::as_str)
-            .map(strip_reference),
+        Some(Value::Object(r)) => match r.get("reference").and_then(Value::as_str) {
+            Some(reference) => {
+                let stripped = strip_reference(reference);
+                if stripped.is_none() {
+                    report.add("malformed_field", id, &format!("{key}.reference is empty"));
+                }
+                stripped
+            }
+            None => None,
+        },
         Some(_) => {
             report.add("malformed_field", id, &format!("{key} is not an object"));
             None
@@ -188,12 +198,6 @@ fn read_boundary(
     None
 }
 
-fn is_boundary_extension(ext: &Value) -> bool {
-    ext.get("url")
-        .and_then(Value::as_str)
-        .map_or(false, |u| BOUNDARY_EXTENSION_URLS.contains(&u))
-}
-
 impl Location {
     /// Flatten one resource. Returns None (after reporting) if it has no usable id.
     pub fn parse(resource: &Value, report: &mut Report) -> Option<Location> {
@@ -228,16 +232,22 @@ impl Location {
         loc.name = str_field(obj, "name");
         loc.status = str_field(obj, "status");
         loc.description = str_field(obj, "description");
-        loc.alias = obj
-            .get("alias")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        match obj.get("alias") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) => {
+                for (i, item) in items.iter().enumerate() {
+                    match item.as_str() {
+                        Some(s) => loc.alias.push(s.to_string()),
+                        None => report.add(
+                            "malformed_field",
+                            &id,
+                            &format!("alias[{i}] is not a string"),
+                        ),
+                    }
+                }
+            }
+            Some(_) => report.add("malformed_field", &id, "alias is not a list"),
+        }
         loc.type_code = first_coding_code(obj.get("type"));
         loc.physical_type = first_coding_code(obj.get("physicalType"));
         loc.facility_level = coding_code_by_system(obj.get("type"), FACILITY_TYPE_SYSTEM);
@@ -297,10 +307,17 @@ impl Location {
             }
         }
 
+        // Index of the extension whose boundary was captured into
+        // `loc.boundary` as `Boundary::Inline` -- the only extension entry
+        // `fhir_json` removes below. A `Boundary::Url` extension, or a
+        // boundary extension that failed to parse, stays in `fhir_json`
+        // untouched: the geometry column carries only what was decoded.
+        let mut captured_boundary_index: Option<usize> = None;
+
         match obj.get("extension") {
             None | Some(Value::Null) => {}
             Some(Value::Array(exts)) => {
-                for ext in exts {
+                for (i, ext) in exts.iter().enumerate() {
                     let Value::Object(e) = ext else {
                         report.add("malformed_field", &id, "extension entry is not an object");
                         continue;
@@ -308,13 +325,25 @@ impl Location {
                     let url = e.get("url").and_then(Value::as_str).unwrap_or("");
                     if BOUNDARY_EXTENSION_URLS.contains(&url) {
                         if loc.boundary.is_none() {
-                            loc.boundary = read_boundary(e, &id, report);
+                            let boundary = read_boundary(e, &id, report);
+                            if let Some(Boundary::Inline(_)) = &boundary {
+                                captured_boundary_index = Some(i);
+                            }
+                            loc.boundary = boundary;
                         }
                     } else if url == OVERLAYS_EXTENSION_URL {
                         match e.get("valueReference") {
                             Some(Value::Object(r)) => {
-                                if let Some(target) = r.get("reference").and_then(Value::as_str) {
-                                    loc.overlays_admin_unit_ids.push(strip_reference(target));
+                                if let Some(reference) = r.get("reference").and_then(Value::as_str)
+                                {
+                                    match strip_reference(reference) {
+                                        Some(target) => loc.overlays_admin_unit_ids.push(target),
+                                        None => report.add(
+                                            "malformed_field",
+                                            &id,
+                                            "overlays extension reference is empty",
+                                        ),
+                                    }
                                 }
                             }
                             Some(_) => report.add(
@@ -334,13 +363,16 @@ impl Location {
             Some(_) => report.add("malformed_field", &id, "extension is not a list"),
         }
 
-        // fhir_json: the resource minus the boundary attachment (the geometry
-        // column carries it). Everything else is preserved verbatim.
+        // fhir_json: the resource minus the one boundary extension actually
+        // captured above. Everything else, including any unusable or
+        // not-yet-resolved boundary extension, is preserved verbatim.
         let mut stripped = resource.clone();
-        if let Some(Value::Array(exts)) = stripped.get_mut("extension") {
-            exts.retain(|e| !is_boundary_extension(e));
-            if exts.is_empty() {
-                stripped.as_object_mut().unwrap().remove("extension");
+        if let Some(index) = captured_boundary_index {
+            if let Some(Value::Array(exts)) = stripped.get_mut("extension") {
+                exts.remove(index);
+                if exts.is_empty() {
+                    stripped.as_object_mut().unwrap().remove("extension");
+                }
             }
         }
         loc.fhir_json = stripped.to_string();
@@ -463,5 +495,128 @@ mod tests {
         .unwrap();
         assert!(loc.boundary.is_none());
         assert_eq!(report.count("boundary_bad_base64"), 1);
+    }
+
+    #[test]
+    fn url_boundary_survives_in_fhir_json() {
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"a","extension":[
+            {"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+             "valueAttachment":{"contentType":"application/geo+json","url":"https://files/x.geojson"}}]}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(
+            loc.boundary,
+            Some(Boundary::Url("https://files/x.geojson".into()))
+        );
+        let json: serde_json::Value = serde_json::from_str(&loc.fhir_json).unwrap();
+        let exts = json["extension"].as_array().unwrap();
+        assert_eq!(exts.len(), 1, "url boundary extension is kept in fhir_json");
+        assert_eq!(
+            exts[0]["url"],
+            "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson"
+        );
+    }
+
+    #[test]
+    fn bad_boundary_is_kept_and_second_boundary_is_used() {
+        let mut report = Report::default();
+        let geojson = r#"{"type":"Point","coordinates":[1,2]}"#;
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, geojson);
+        let src = format!(
+            r#"{{"resourceType":"Location","id":"a","extension":[
+            {{"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+              "valueAttachment":{{"contentType":"application/geo+json","data":"!!!"}}}},
+            {{"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+              "valueAttachment":{{"contentType":"application/geo+json","data":"{b64}"}}}}]}}"#
+        );
+        let loc = parse_str(&src, &mut report).unwrap();
+        match &loc.boundary {
+            Some(Boundary::Inline(bytes)) => assert_eq!(bytes, geojson.as_bytes()),
+            other => panic!("expected inline boundary, got {other:?}"),
+        }
+        let json: serde_json::Value = serde_json::from_str(&loc.fhir_json).unwrap();
+        let exts = json["extension"].as_array().unwrap();
+        assert_eq!(exts.len(), 1, "only the bad boundary extension remains");
+        assert_eq!(exts[0]["valueAttachment"]["data"], "!!!");
+        assert_eq!(report.count("boundary_bad_base64"), 1);
+    }
+
+    #[test]
+    fn alias_shapes_are_reported() {
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"a","alias":"notalist"}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert!(loc.alias.is_empty());
+        assert_eq!(report.count("malformed_field"), 1);
+
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"b","alias":["x",1,null]}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(loc.alias, vec!["x".to_string()]);
+        assert_eq!(report.count("malformed_field"), 2);
+    }
+
+    #[test]
+    fn position_with_string_numbers_is_reported() {
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"a","position":{"longitude":"3.25","latitude":6.25}}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(loc.position, None);
+        assert_eq!(report.count("malformed_field"), 1);
+    }
+
+    #[test]
+    fn empty_references_are_reported() {
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"a","partOf":{"reference":""}}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(loc.part_of, None);
+        assert_eq!(report.count("malformed_field"), 1);
+
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"b","extension":[
+            {"url":"https://icr.healthcampaigns.org/StructureDefinition/overlays-admin-unit",
+             "valueReference":{"reference":"Location/"}}]}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert!(loc.overlays_admin_unit_ids.is_empty());
+        assert_eq!(report.count("malformed_field"), 1);
+    }
+
+    #[test]
+    fn fhir_json_has_no_extension_key_when_only_boundary() {
+        let mut report = Report::default();
+        let geojson = r#"{"type":"Point","coordinates":[1,2]}"#;
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, geojson);
+        let src = format!(
+            r#"{{"resourceType":"Location","id":"a","extension":[
+            {{"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+              "valueAttachment":{{"contentType":"application/geo+json","data":"{b64}"}}}}]}}"#
+        );
+        let loc = parse_str(&src, &mut report).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&loc.fhir_json).unwrap();
+        assert!(json.as_object().unwrap().get("extension").is_none());
+
+        let mut report = Report::default();
+        let loc = parse_str(r#"{"resourceType":"Location","id":"b"}"#, &mut report).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&loc.fhir_json).unwrap();
+        assert!(json.as_object().unwrap().get("extension").is_none());
     }
 }

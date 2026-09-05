@@ -15,7 +15,7 @@ arrow-schema = "59"
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd", "geospatial"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 geojson = "1"
 geo = "0.33"
