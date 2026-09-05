@@ -862,7 +862,7 @@ git commit -m "Parse FHIR Location resources into the kiln Location struct"
 - Create: `src/fhir/ndjson.rs`
 - Modify: `src/fhir/mod.rs` (add `pub mod ndjson;`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `src/fhir/ndjson.rs`:
 
@@ -916,12 +916,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test fhir::ndjson 2>&1 | grep -E "^error" | head -3`
 Expected: compile errors.
 
-- [ ] **Step 3: Implement NdjsonReader and LineAccess**
+- [x] **Step 3: Implement NdjsonReader and LineAccess**
+
+> Superseded during execution: the shipped `src/fhir/ndjson.rs` additionally skips a UTF-8 BOM (seeding the offset to 3), bounds the pretty-print peek to 64 KiB, rejects a head that starts with `[`, and reuses the line buffer across `next()` calls. Treat the file as the reference, not the listing below.
 
 ```rust
 //! Streaming NDJSON. `NdjsonReader` yields each line with its byte offset so
@@ -1034,12 +1036,12 @@ impl LineAccess {
 
 Note the validity check is only "starts with `{`"; JSON parsing happens in the caller so the reader stays cheap. Add `pub mod ndjson;` to `src/fhir/mod.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test fhir::ndjson`
 Expected: 4 passed. (The "unparseable line" test passes because `not json` does not start with `{`.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/fhir
