@@ -2649,7 +2649,7 @@ git commit -m "Define the output Arrow schema and row batch builders"
 **Files:**
 - Modify: `src/write/parquet.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[cfg(test)]
@@ -2712,7 +2712,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement PartitionWriter**
+- [x] **Step 2: Implement PartitionWriter**
 
 ```rust
 //! One Parquet file per partition. Native GEOMETRY logical type comes from
@@ -2808,12 +2808,12 @@ impl PartitionWriter {
 
 Note the `crs` key is deliberately absent from the column metadata (GeoPandas reads an explicit `null` as "no CRS" and an absent key as CRS84; see the spike README).
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test write::parquet`
 Expected: 1 passed. If `rows == 3` but `row_groups == 1`, `ArrowWriter` merged the batches: `flush()` after each `write` forces a row group boundary; confirm it is called.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/write/parquet.rs
