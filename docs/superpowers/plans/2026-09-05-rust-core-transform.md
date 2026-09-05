@@ -3645,11 +3645,11 @@ Not part of this plan's acceptance. Once Task 15 has recorded the single-threade
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Update the Status note and Building section**
+- [x] **Step 1: Update the Status note and Building section**
 
 In `README.md`, change the Status callout to say that `transform` and `inspect` are implemented in Rust, `extract`, `diff` and `load` are in progress, and the Python package under `python/` still provides `extract`, `bake`, `bake-points` and `load` meanwhile. In "Building", add the memory measurement from Task 15 as one line: the synthetic snapshot size, wall time, and peak RSS on this machine.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add README.md
