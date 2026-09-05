@@ -1571,7 +1571,7 @@ Wire `Command::Extract(args) => extract::run_extract(&args)` in main.rs.
 
 **Files:** `src/run.rs`, `src/main.rs`, `tests/extract.rs`
 
-- [ ] **Step 1: Tests (append to tests/extract.rs)**
+- [x] **Step 1: Tests (append to tests/extract.rs)**
 
 ```rust
 #[test]
@@ -1581,7 +1581,7 @@ fn run_extracts_then_transforms() { /* server with 2 locations (one with positio
 fn run_skips_transform_when_extract_fails() { /* server returning 401 on the search; exit 1; O has no locations dir */ }
 ```
 
-- [ ] **Step 2: Implement src/run.rs**
+- [x] **Step 2: Implement src/run.rs**
 
 ```rust
 //! `kiln run`: extract then transform, with the snapshot as the handoff.
@@ -1599,7 +1599,7 @@ pub fn run(args: &RunArgs) -> Result<()> {
 
 Wire `Command::Run(args) => run::run(&args)`.
 
-- [ ] **Step 3: Run** all tests, clippy, fmt. **Commit** `git commit -m "Add kiln run: extract then transform"`
+- [x] **Step 3: Run** all tests, clippy, fmt. **Commit** `git commit -m "Add kiln run: extract then transform"`
 
 ---
 
