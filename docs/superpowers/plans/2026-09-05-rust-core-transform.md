@@ -3334,7 +3334,7 @@ git commit -m "Add kiln transform: snapshot to partitioned GeoParquet with repor
 - Create: `src/inspect.rs`
 - Modify: `src/main.rs`, `tests/transform.rs`
 
-- [ ] **Step 1: Write the failing test (append to tests/transform.rs)**
+- [x] **Step 1: Write the failing test (append to tests/transform.rs)**
 
 ```rust
 #[test]
@@ -3353,7 +3353,7 @@ fn inspect_summarises_a_written_dataset() {
 }
 ```
 
-- [ ] **Step 2: Implement src/inspect.rs**
+- [x] **Step 2: Implement src/inspect.rs**
 
 ```rust
 //! `kiln inspect`: describe every parquet file under OUT/locations.
@@ -3478,12 +3478,12 @@ pub fn run_inspect(args: &InspectArgs) -> Result<()> {
 
 Wire it in `src/main.rs` (add `mod inspect;` and the `Inspect` arm as shown in Task 13).
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 Run: `cargo test --test transform inspect`
 Expected: 1 passed.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/inspect.rs src/main.rs tests/transform.rs
