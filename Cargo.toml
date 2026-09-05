@@ -13,7 +13,7 @@ path = "src/main.rs"
 arrow-array = "59"
 arrow-schema = "59"
 parquet = { version = "59", default-features = false, features = ["arrow", "zstd", "geospatial"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
@@ -23,11 +23,14 @@ geo-types = "0.7"
 wkb = "0.9"
 base64 = "0.22"
 sha2 = "0.11"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+httptest = "0.16"
 
 [profile.release]
 lto = true
