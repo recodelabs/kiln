@@ -1869,7 +1869,7 @@ git commit -m "Add Hilbert curve key for spatial row ordering"
 **Files:**
 - Modify: `src/index/partition.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -1907,7 +1907,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 //! Which columns a row can be partitioned by, and how a value becomes a
@@ -2007,12 +2007,12 @@ pub fn segment(key: &str, value: &str, claims: &mut Claims, report: &mut Report)
 }
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test index::partition`
 Expected: 3 passed.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/index/partition.rs
