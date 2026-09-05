@@ -1,1 +1,438 @@
-//! Filled in Task 6.
+//! Phase three: stream the old snapshot and the incoming file into a new
+//! locations.ndjson, inlining boundary bytes and computing the watermark.
+
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::Path;
+
+use base64::Engine;
+use serde_json::Value;
+
+use crate::error::{KilnError, Result};
+use crate::extract::page::PageNote;
+use crate::fhir::location::{BOUNDARY_EXTENSION_URLS, GEOJSON_CONTENT_TYPE};
+use crate::fhir::ndjson::NdjsonReader;
+use crate::report::Report;
+use crate::snapshot::instant::later;
+use crate::snapshot::Snapshot;
+
+#[derive(Debug)]
+pub struct MergeStats {
+    pub total: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub watermark: Option<String>,
+}
+
+/// The parts of a merge that stay fixed while it runs, bundled so the
+/// worker function doesn't need a long argument list.
+struct MergeInput<'a> {
+    notes: &'a [PageNote],
+    full: bool,
+    lookup: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+    failures: &'a HashMap<String, String>,
+}
+
+/// Replace the boundary attachment that carries `url` with inline base64 data.
+fn inline_boundary(resource: &mut Value, url: &str, bytes: &[u8]) -> bool {
+    let Some(exts) = resource.get_mut("extension").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    for ext in exts.iter_mut() {
+        let is_boundary = ext
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|u| BOUNDARY_EXTENSION_URLS.contains(&u));
+        if !is_boundary {
+            continue;
+        }
+        let Some(att) = ext
+            .get_mut("valueAttachment")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        if att.get("url").and_then(Value::as_str) != Some(url) {
+            continue;
+        }
+        att.remove("url");
+        att.insert(
+            "data".into(),
+            Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        );
+        att.entry("contentType")
+            .or_insert_with(|| Value::String(GEOJSON_CONTENT_TYPE.into()));
+        return true;
+    }
+    false
+}
+
+fn id_and_updated(text: &str) -> Option<(String, Option<String>)> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let id = v.get("id")?.as_str()?.to_string();
+    let updated = v
+        .pointer("/meta/lastUpdated")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some((id, updated))
+}
+
+/// Stream `locations.ndjson` and `.incoming.ndjson` into a new
+/// `locations.ndjson`, upserting by id.
+///
+/// A line surviving from the old snapshot is any old id not present among
+/// `notes`; every incoming line replaces its old counterpart (if any). When
+/// a note carries a `boundary_url`, `lookup` is tried for the raw boundary
+/// bytes to inline; a lookup miss is reported via `failures` (the reason a
+/// fetch did not happen) rather than failing the merge. `full` skips the old
+/// snapshot entirely, so a `--full` re-extract starts clean. On success the
+/// new file is renamed over `locations.ndjson` and the incoming file is
+/// removed; on failure the temp file is cleaned up and neither is touched.
+pub fn merge(
+    snap: &Snapshot,
+    notes: &[PageNote],
+    full: bool,
+    lookup: &dyn Fn(&str) -> Option<Vec<u8>>,
+    failures: &HashMap<String, String>,
+    report: &mut Report,
+) -> Result<MergeStats> {
+    let input = MergeInput {
+        notes,
+        full,
+        lookup,
+        failures,
+    };
+    let tmp = snap.locations_tmp();
+    let result = merge_into(snap, &input, report, &tmp);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+fn merge_into(
+    snap: &Snapshot,
+    input: &MergeInput,
+    report: &mut Report,
+    tmp: &Path,
+) -> Result<MergeStats> {
+    let incoming_ids: HashSet<&str> = input.notes.iter().map(|n| n.id.as_str()).collect();
+    // Last occurrence of each id in the incoming file wins.
+    let mut last_index: HashMap<&str, usize> = HashMap::new();
+    for (i, n) in input.notes.iter().enumerate() {
+        last_index.insert(&n.id, i);
+    }
+
+    let file = std::fs::File::create(tmp).map_err(|e| KilnError::io(tmp, e))?;
+    let mut out = std::io::BufWriter::new(file);
+    let mut stats = MergeStats {
+        total: 0,
+        added: 0,
+        updated: 0,
+        watermark: None,
+    };
+    let mut old_ids: HashSet<String> = HashSet::new();
+
+    if !input.full && snap.locations().exists() {
+        for line in NdjsonReader::open(&snap.locations())? {
+            let line = line?;
+            match id_and_updated(&line.text) {
+                Some((id, _)) if incoming_ids.contains(id.as_str()) => {
+                    old_ids.insert(id);
+                    continue;
+                }
+                Some((id, updated)) => {
+                    if let Some(u) = updated {
+                        stats.watermark = later(stats.watermark.as_deref(), &u);
+                    }
+                    old_ids.insert(id);
+                }
+                None => report.add(
+                    "snapshot_line_unparsed",
+                    &format!("line {}", line.number),
+                    "not a JSON object with an id; copied unchanged",
+                ),
+            }
+            writeln!(out, "{}", line.text).map_err(|e| KilnError::io(tmp, e))?;
+            stats.total += 1;
+        }
+    }
+
+    let mut seen = 0usize;
+    for (i, line) in NdjsonReader::open(&snap.incoming())?.enumerate() {
+        let line = line?;
+        seen += 1;
+        let Some(note) = input.notes.get(i) else {
+            return Err(KilnError::Environment(
+                "incoming file and page notes disagree; rerun extract".into(),
+            ));
+        };
+        if last_index.get(note.id.as_str()) != Some(&i) {
+            continue;
+        }
+        let mut resource: Value = serde_json::from_str(&line.text)?;
+        if let Some(url) = &note.boundary_url {
+            match (input.lookup)(url) {
+                Some(bytes) => {
+                    inline_boundary(&mut resource, url, &bytes);
+                }
+                None => report.add(
+                    "boundary_fetch_failed",
+                    &note.id,
+                    &format!(
+                        "{url}: {}",
+                        input
+                            .failures
+                            .get(url.as_str())
+                            .map(String::as_str)
+                            .unwrap_or("not fetched")
+                    ),
+                ),
+            }
+        }
+        if let Some(u) = &note.last_updated {
+            stats.watermark = later(stats.watermark.as_deref(), u);
+        }
+        serde_json::to_writer(&mut out, &resource).map_err(KilnError::Json)?;
+        out.write_all(b"\n").map_err(|e| KilnError::io(tmp, e))?;
+        stats.total += 1;
+        if old_ids.contains(&note.id) {
+            stats.updated += 1;
+        } else {
+            stats.added += 1;
+        }
+    }
+    if seen != input.notes.len() {
+        return Err(KilnError::Environment(
+            "incoming file and page notes disagree; rerun extract".into(),
+        ));
+    }
+    out.flush().map_err(|e| KilnError::io(tmp, e))?;
+    let file = out
+        .into_inner()
+        .map_err(|e| KilnError::io(tmp, e.into_error()))?;
+    file.sync_all().map_err(|e| KilnError::io(tmp, e))?;
+    std::fs::rename(tmp, snap.locations()).map_err(|e| KilnError::io(tmp, e))?;
+    let _ = std::fs::remove_file(snap.incoming());
+    Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extract::page::PageNote;
+    use crate::report::Report;
+    use std::collections::HashMap;
+
+    fn line(id: &str, updated: &str, boundary_url: Option<&str>) -> String {
+        let mut r =
+            serde_json::json!({"resourceType":"Location","id":id,"meta":{"lastUpdated":updated}});
+        if let Some(u) = boundary_url {
+            r["extension"] = serde_json::json!([{"url":"https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson","valueAttachment":{"url":u}}]);
+        }
+        r.to_string()
+    }
+    fn note(id: &str, updated: &str, url: Option<&str>) -> PageNote {
+        PageNote {
+            id: id.into(),
+            last_updated: Some(updated.into()),
+            boundary_url: url.map(str::to_string),
+        }
+    }
+    fn ids(text: &str) -> Vec<String> {
+        text.lines()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l)
+                    .map(|v| v["id"].as_str().unwrap_or("?").to_string())
+                    .unwrap_or_else(|_| "<unparsed>".into())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn upserts_inlines_and_advances_the_watermark() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(
+            snap.locations(),
+            format!(
+                "{}\n{}\n",
+                line("a", "2026-01-01T00:00:00Z", None),
+                line("b", "2026-01-02T00:00:00Z", None)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            snap.incoming(),
+            format!(
+                "{}\n{}\n",
+                line("b", "2026-01-03T00:00:00Z", Some("https://x/b")),
+                line("c", "2026-01-04T00:00:00Z", None)
+            ),
+        )
+        .unwrap();
+        let notes = vec![
+            note("b", "2026-01-03T00:00:00Z", Some("https://x/b")),
+            note("c", "2026-01-04T00:00:00Z", None),
+        ];
+        let mut bytes = HashMap::new();
+        bytes.insert(
+            "https://x/b".to_string(),
+            b"{\"type\":\"Point\",\"coordinates\":[1,2]}".to_vec(),
+        );
+        let lookup = |u: &str| bytes.get(u).cloned();
+        let mut report = Report::default();
+        let stats = merge(&snap, &notes, false, &lookup, &HashMap::new(), &mut report).unwrap();
+        assert_eq!((stats.total, stats.added, stats.updated), (3, 1, 1));
+        assert_eq!(stats.watermark.as_deref(), Some("2026-01-04T00:00:00Z"));
+        let text = std::fs::read_to_string(snap.locations()).unwrap();
+        assert_eq!(ids(&text), vec!["a", "b", "c"]);
+        let b: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+        let att = &b["extension"][0]["valueAttachment"];
+        assert!(att.get("url").is_none());
+        assert_eq!(att["contentType"], "application/geo+json");
+        let decoded = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            att["data"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded, b"{\"type\":\"Point\",\"coordinates\":[1,2]}");
+        assert!(!snap.locations_tmp().exists());
+        assert!(!snap.incoming().exists());
+        assert_eq!(report.counts().len(), 0);
+    }
+
+    #[test]
+    fn full_ignores_the_old_snapshot_and_a_failed_boundary_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(
+            snap.locations(),
+            format!("{}\n", line("old", "2026-01-01T00:00:00Z", None)),
+        )
+        .unwrap();
+        std::fs::write(
+            snap.incoming(),
+            format!(
+                "{}\n",
+                line("n", "2026-01-02T00:00:00Z", Some("https://x/n"))
+            ),
+        )
+        .unwrap();
+        let notes = vec![note("n", "2026-01-02T00:00:00Z", Some("https://x/n"))];
+        let mut failures = HashMap::new();
+        failures.insert("https://x/n".to_string(), "HTTP 404".to_string());
+        let mut report = Report::default();
+        let stats = merge(&snap, &notes, true, &|_| None, &failures, &mut report).unwrap();
+        assert_eq!((stats.total, stats.added, stats.updated), (1, 1, 0));
+        assert_eq!(report.count("boundary_fetch_failed"), 1);
+        let text = std::fs::read_to_string(snap.locations()).unwrap();
+        assert!(!text.contains("\"old\""));
+        assert!(text.contains("https://x/n"), "attachment left as a url");
+    }
+
+    #[test]
+    fn duplicate_incoming_ids_keep_the_last_and_unparsed_old_lines_are_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(snap.locations(), "{\"not\":\"a location\"}\n").unwrap();
+        std::fs::write(
+            snap.incoming(),
+            format!(
+                "{}\n{}\n",
+                line("d", "2026-01-01T00:00:00Z", None),
+                line("d", "2026-01-05T00:00:00Z", None)
+            ),
+        )
+        .unwrap();
+        let notes = vec![
+            note("d", "2026-01-01T00:00:00Z", None),
+            note("d", "2026-01-05T00:00:00Z", None),
+        ];
+        let mut report = Report::default();
+        let stats = merge(
+            &snap,
+            &notes,
+            false,
+            &|_| None,
+            &HashMap::new(),
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(stats.total, 2, "the unparsed line plus d");
+        assert_eq!((stats.added, stats.updated), (1, 0));
+        assert_eq!(report.count("snapshot_line_unparsed"), 1);
+        let text = std::fs::read_to_string(snap.locations()).unwrap();
+        assert_eq!(text.matches("\"id\":\"d\"").count(), 1);
+        assert!(text.contains("2026-01-05"));
+        assert_eq!(stats.watermark.as_deref(), Some("2026-01-05T00:00:00Z"));
+    }
+
+    #[test]
+    fn no_existing_snapshot_is_fine_and_old_watermark_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(
+            snap.incoming(),
+            format!("{}\n", line("a", "2026-01-01T00:00:00Z", None)),
+        )
+        .unwrap();
+        let notes = vec![note("a", "2026-01-01T00:00:00Z", None)];
+        let stats = merge(
+            &snap,
+            &notes,
+            false,
+            &|_| None,
+            &HashMap::new(),
+            &mut Report::default(),
+        )
+        .unwrap();
+        assert_eq!((stats.total, stats.added), (1, 1));
+        // A second incremental run with an older incoming line keeps the newer old watermark.
+        std::fs::write(
+            snap.incoming(),
+            format!("{}\n", line("z", "2025-01-01T00:00:00Z", None)),
+        )
+        .unwrap();
+        let notes = vec![note("z", "2025-01-01T00:00:00Z", None)];
+        let stats = merge(
+            &snap,
+            &notes,
+            false,
+            &|_| None,
+            &HashMap::new(),
+            &mut Report::default(),
+        )
+        .unwrap();
+        assert_eq!(stats.watermark.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(stats.total, 2);
+    }
+
+    #[test]
+    fn a_note_count_mismatch_is_an_environment_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(
+            snap.incoming(),
+            format!(
+                "{}\n{}\n",
+                line("a", "2026-01-01T00:00:00Z", None),
+                line("b", "2026-01-01T00:00:00Z", None)
+            ),
+        )
+        .unwrap();
+        let notes = vec![note("a", "2026-01-01T00:00:00Z", None)];
+        let err = merge(
+            &snap,
+            &notes,
+            true,
+            &|_| None,
+            &HashMap::new(),
+            &mut Report::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert!(!snap.locations().exists(), "nothing renamed into place");
+        assert!(!snap.locations_tmp().exists(), "tmp cleaned up");
+    }
+}
