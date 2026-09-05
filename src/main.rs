@@ -1,5 +1,6 @@
 mod cli;
 mod error;
+mod fhir;
 mod report;
 
 use clap::Parser;
