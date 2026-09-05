@@ -101,6 +101,9 @@ pub struct ExtractArgs {
     /// Boundary cache directory (default: SNAPSHOT/boundaries)
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
+    /// Total timeout per HTTP request, in seconds (added after the Task 2 review)
+    #[arg(long, default_value_t = 300)]
+    pub timeout: u64,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -411,7 +414,7 @@ Create `src/snapshot/merge.rs` as a placeholder (`//! Filled in Task 6.`). Add `
 
 **Files:** `src/extract/mod.rs` (declarations only for now), `src/extract/client.rs`, `src/main.rs` (`mod extract;`)
 
-- [ ] **Step 1: Tests** (in client.rs; these use httptest and real sleeps of at most 1.5 s)
+- [x] **Step 1: Tests** (in client.rs; these use httptest and real sleeps of at most 1.5 s)
 
 ```rust
 #[cfg(test)]
@@ -497,7 +500,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement client.rs**
+- [x] **Step 2: Implement client.rs**
 
 ```rust
 //! The one HTTP client. Bearer auth, FHIR accept header, and the retry
@@ -609,9 +612,9 @@ impl FhirClient {
 
 `src/extract/mod.rs` for now: `pub mod client;` plus placeholders `pub mod cache; pub mod page; pub mod boundary;` with one-line placeholder files. Add `mod extract;` to main.rs.
 
-- [ ] **Step 3: Run** `cargo test extract::client` (8 passed; the 429 test takes about a second).
+- [x] **Step 3: Run** `cargo test extract::client` (8 passed; the 429 test takes about a second).
 
-- [ ] **Step 4: Commit** `git commit -m "Add the FHIR HTTP client with retry, backoff and Retry-After"`
+- [x] **Step 4: Commit** `git commit -m "Add the FHIR HTTP client with retry, backoff and Retry-After"`
 
 ---
 
@@ -1482,7 +1485,7 @@ use crate::snapshot::merge::merge;
 use crate::snapshot::{same_server, Snapshot, State};
 use crate::transform::write_report;
 
-const TIMEOUT: Duration = Duration::from_secs(60);
+// The request timeout is a total per-request deadline (reqwest's blocking builder has no per-read timeout); a large boundary over a slow link can legitimately take minutes, hence the 300 s default on --timeout.
 
 pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     if args.no_cache && (args.refresh || args.cache_dir.is_some()) {
@@ -1519,7 +1522,7 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     let full = since.is_none();
     eprintln!("{}", match &since { Some(s) => format!("incremental extract since {s}"), None => "full extract".to_string() });
 
-    let client = FhirClient::new(args.token.clone(), args.retries, TIMEOUT)?;
+    let client = FhirClient::new(args.token.clone(), args.retries, Duration::from_secs(args.timeout))?;
     let mut report = Report::default();
 
     let paged = page_locations(&client, &args.server, since.as_deref(), &snap.incoming(), &mut report)?;
