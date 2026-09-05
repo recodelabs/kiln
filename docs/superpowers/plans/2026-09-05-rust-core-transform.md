@@ -1263,7 +1263,7 @@ git commit -m "Parse boundary GeoJSON into geo geometries and encode WKB"
 **Files:**
 - Modify: `src/geometry/mod.rs`
 
-- [ ] **Step 1: Write the failing tests (append to src/geometry/mod.rs)**
+- [x] **Step 1: Write the failing tests (append to src/geometry/mod.rs)**
 
 ```rust
 #[cfg(test)]
@@ -1339,12 +1339,14 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test geometry::tests 2>&1 | grep -E "^error" | head -3`
 Expected: compile errors.
 
-- [ ] **Step 3: Implement GeomKind, GeometrySummary, GeometryResult, summarize, build**
+- [x] **Step 3: Implement GeomKind, GeometrySummary, GeometryResult, summarize, build**
+
+> Superseded during execution: the shipped `src/geometry/mod.rs` splits the work so that `summarize` (pass one) validates via `src/geometry/validity.rs` (a sweep-based self-intersection test with reasons; geo's `is_valid` is O(n²)) and reports `geometry_invalid`, `geometry_empty` and `position_outside_boundary`, while `build` (pass two) only computes the representative point and reports `geometry_no_interior_point` instead of falling back to the bbox centre. Treat the files as the reference.
 
 Replace `src/geometry/mod.rs` contents above the tests with:
 
@@ -1468,12 +1470,12 @@ pub fn summarize(loc: &Location, report: &mut Report) -> Option<GeometrySummary>
 
 `summarize` calls `build` and drops the geometry. That parses once per pass, which is the README's design; the polygon lives only for the duration of the call.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test geometry`
 Expected: 11 passed. If the bowtie is reported valid by `geo`, check the ring orientation; a self-intersecting ring must fail `is_valid`. If `size_of::<GeometrySummary>()` is not 40, adjust the assertion to the printed value; it exists to catch accidental growth.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/geometry
@@ -3629,6 +3631,10 @@ git commit -m "Add synthetic snapshot generator, memory check, and CI with relea
 ```
 
 ---
+
+## Follow-up (after Task 15): parallel passes
+
+Not part of this plan's acceptance. Once Task 15 has recorded the single-threaded baseline, add a task that introduces `rayon` with a `--threads N` flag (default: available cores): pass one parses chunks of lines in parallel and merges per-thread reports; pass two encodes row-group-sized chunks of the sorted index in parallel (each worker with its own file handle for the random reads) and hands finished batches to one writer per partition in order. Memory bound rises by one batch per worker. Re-measure against the Task 15 numbers.
 
 ## Task 16: README touch-ups
 
