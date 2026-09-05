@@ -970,7 +970,7 @@ pub fn page_locations(
 
 **Files:** `src/extract/boundary.rs`
 
-- [ ] **Step 1: Tests**
+- [x] **Step 1: Tests**
 
 ```rust
 #[cfg(test)]
@@ -1047,7 +1047,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 //! Phase two: resolve the distinct boundary URLs on a worker pool into the
@@ -1209,11 +1209,13 @@ pub fn fetch_boundaries(client: &FhirClient, urls: &[String], opts: &FetchOption
 
 Note the breaker: after `stop` is set, the scope still joins running workers (they finish their current request) and the loop drains what arrived; outcomes past the trip are not applied. Verify the test still terminates in bounded time (workers check `stop` before each new item).
 
-- [ ] **Step 3: Run** `cargo test extract::boundary` (5 passed).
+- [x] **Step 3: Run** `cargo test extract::boundary` (5 passed).
 
-- [ ] **Step 4: Commit** `git commit -m "Fetch boundary attachments on a worker pool with a circuit breaker"`
+- [x] **Step 4: Commit** `git commit -m "Fetch boundary attachments on a worker pool with a circuit breaker"`
 
 ---
+
+> Note from the Task 5 review: with `--retries 3` and a 300 s timeout, a dead server costs about 15 minutes per boundary attempt cycle, so at concurrency 8 the default breaker of 50 consecutive failures can take over an hour to trip. The breaker guards wasted work, not latency; an operator who wants fast failure lowers `--timeout` or `--max-consecutive-failures`. Task 9 should say this in the README.
 
 ## Task 6: Merge
 
