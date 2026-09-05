@@ -4,6 +4,7 @@ mod fhir;
 mod geometry;
 mod index;
 mod report;
+mod write;
 
 use clap::Parser;
 
