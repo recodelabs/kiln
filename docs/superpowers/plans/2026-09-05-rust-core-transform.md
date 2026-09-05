@@ -282,7 +282,7 @@ git commit -m "Scaffold the Rust crate; move the Python package under python/"
 - Create: `src/report.rs`
 - Modify: `src/main.rs` (add `mod report;`)
 
-- [ ] **Step 1: Write the failing tests (inside the module)**
+- [x] **Step 1: Write the failing tests (inside the module)**
 
 Create `src/report.rs` with only the test module for now:
 
@@ -328,12 +328,12 @@ mod tests {
 
 Add `mod report;` to `src/main.rs`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test report 2>&1 | grep -E "error|Report" | head`
 Expected: compile errors, `Report` not found.
 
-- [ ] **Step 3: Implement Report above the tests**
+- [x] **Step 3: Implement Report above the tests**
 
 ```rust
 //! Data-quality issues found during a run. Never aborts; callers keep going.
@@ -422,12 +422,12 @@ impl Report {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test report`
 Expected: 3 passed.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/report.rs src/main.rs
