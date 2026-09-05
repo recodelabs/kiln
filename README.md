@@ -535,6 +535,14 @@ output:
 Both are a few lines of glue outside kiln, and both are rebuilt from the same
 parquet after every transform.
 
+For a production deployment the likely tile server is
+[Martin](https://maplibre.org/martin/), a MapLibre project written in Rust.
+It serves PMTiles from local files or over HTTP, so it can front the
+tippecanoe output directly, and it has a GeoParquet source backed by DuckDB
+that would cut tiles from kiln's parquet with no bake step at all. That
+source is marked unstable at the time of writing; the PMTiles path is the
+one to rely on until it settles.
+
 ---
 
 ## Design decisions
