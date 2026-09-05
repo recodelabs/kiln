@@ -2027,7 +2027,7 @@ git commit -m "Add partition keys with sanitised, collision-free directory segme
 - Create: `src/index/build.rs`
 - Modify: `src/index/mod.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `src/index/build.rs`:
 
@@ -2075,7 +2075,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Implement build_index**
+- [x] **Step 2: Implement build_index**
+
+> Superseded during execution: the shipped `src/index/build.rs` keeps all records plus `order: Vec<u32>` (see the Task 6 note), uses a fixed WGS84 extent `HILBERT_EXTENT` for the Hilbert key, only consults the hierarchy for the country when there is no override, and treats a non-JSON line as a reported `malformed_field` rather than an abort. Treat the file as the reference.
 
 ```rust
 //! Pass one: stream the snapshot, keep an IndexRecord per Location, resolve
@@ -2197,12 +2199,12 @@ pub mod build;
 pub use build::{build_index, Index, UNKNOWN_COUNTRY};
 ```
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo test index::build`
 Expected: 2 passed. If the count of retained records differs, print `ids` and reconcile against the fixture comments in `python/tests/fixtures/build_fixture.py`: `remote` has a URL boundary and no position, so it has no geometry and is dropped; `dup` has a polygon and is kept.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/index
