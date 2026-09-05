@@ -1,1 +1,448 @@
-//! Filled in a later task.
+//! Phase two: resolve the distinct boundary URLs on a worker pool into the
+//! cache (or memory with --no-cache). Workers only fetch and write cache
+//! entries; the main thread consumes outcomes in submission order so the
+//! counters and any reports are deterministic.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
+
+use base64::Engine;
+
+use crate::error::{KilnError, Result};
+use crate::extract::cache::Cache;
+use crate::extract::client::FhirClient;
+use crate::report::Report;
+
+const PROGRESS_MIN_ITEMS: usize = 50;
+
+pub struct FetchOptions {
+    pub concurrency: usize,
+    /// None = --no-cache: bytes are kept in `FetchSummary::in_memory`.
+    pub cache: Option<Cache>,
+    pub refresh: bool,
+    /// 0 disables the breaker.
+    pub max_consecutive_failures: usize,
+}
+
+#[derive(Debug)]
+enum Outcome {
+    Cached,
+    /// Fetched; `Some(bytes)` when they must be kept in memory (no cache, or the cache write failed).
+    Fetched(Option<Vec<u8>>),
+    Failed(String),
+}
+
+#[derive(Debug, Default)]
+pub struct FetchSummary {
+    pub cached: usize,
+    pub fetched: usize,
+    pub failed: usize,
+    /// url -> failure detail, for the merge to report per resource.
+    pub failures: HashMap<String, String>,
+    /// url -> bytes, for --no-cache or when a cache write failed.
+    pub in_memory: HashMap<String, Vec<u8>>,
+}
+
+/// A 200 body: a FHIR Binary is base64-decoded; anything else is the bytes.
+pub fn extract_payload(body: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+        if v.get("resourceType").and_then(|t| t.as_str()) == Some("Binary") {
+            let data = v
+                .get("data")
+                .and_then(|d| d.as_str())
+                .filter(|d| !d.is_empty())
+                .ok_or("Binary has no data")?;
+            return base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|e| format!("Binary data is not valid base64: {e}"));
+        }
+    }
+    Ok(body.to_vec())
+}
+
+fn resolve_one(
+    client: &FhirClient,
+    url: &str,
+    opts: &FetchOptions,
+    cache_errors: &mut Vec<String>,
+) -> Outcome {
+    if let (Some(cache), false) = (&opts.cache, opts.refresh) {
+        match cache.read(url) {
+            Ok(Some(_)) => return Outcome::Cached,
+            Ok(None) => {}
+            Err(e) => cache_errors.push(e),
+        }
+    }
+    let body = match client.get(url) {
+        Ok(f) => f.body,
+        Err(e) => return Outcome::Failed(format!("{url}: {e}")),
+    };
+    let bytes = match extract_payload(&body) {
+        Ok(b) => b,
+        Err(e) => return Outcome::Failed(format!("{url}: {e}")),
+    };
+    match &opts.cache {
+        Some(cache) => match cache.write(url, &bytes) {
+            Ok(()) => Outcome::Fetched(None),
+            Err(e) => {
+                cache_errors.push(e);
+                Outcome::Fetched(Some(bytes))
+            }
+        },
+        None => Outcome::Fetched(Some(bytes)),
+    }
+}
+
+pub fn fetch_boundaries(
+    client: &FhirClient,
+    urls: &[String],
+    opts: &FetchOptions,
+    report: &mut Report,
+) -> Result<FetchSummary> {
+    let total = urls.len();
+    let workers = opts.concurrency.max(1).min(total.max(1));
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel::<(usize, Outcome, Vec<String>)>();
+
+    let mut summary = FetchSummary::default();
+    let interval = (total / 20).max(1);
+    let mut consecutive = 0usize;
+    let mut any_success = false;
+    let mut pending: HashMap<usize, (Outcome, Vec<String>)> = HashMap::new();
+    let mut cursor = 0usize;
+    let mut breaker: Option<String> = None;
+
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let next = &next;
+            let stop = &stop;
+            s.spawn(move || loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= total {
+                    break;
+                }
+                let mut errs = Vec::new();
+                let outcome = resolve_one(client, &urls[i], opts, &mut errs);
+                if tx.send((i, outcome, errs)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(tx);
+        for (i, outcome, errs) in rx.iter() {
+            pending.insert(i, (outcome, errs));
+            while let Some((outcome, errs)) = pending.remove(&cursor) {
+                let url = &urls[cursor];
+                for e in errs {
+                    report.add("cache_error", url, &e);
+                }
+                match outcome {
+                    Outcome::Cached => {
+                        summary.cached += 1;
+                        any_success = true;
+                        consecutive = 0;
+                    }
+                    Outcome::Fetched(bytes) => {
+                        summary.fetched += 1;
+                        any_success = true;
+                        consecutive = 0;
+                        if let Some(b) = bytes {
+                            summary.in_memory.insert(url.clone(), b);
+                        }
+                    }
+                    Outcome::Failed(detail) => {
+                        summary.failed += 1;
+                        consecutive += 1;
+                        summary.failures.insert(url.clone(), detail.clone());
+                        if opts.max_consecutive_failures > 0
+                            && !any_success
+                            && consecutive >= opts.max_consecutive_failures
+                            && breaker.is_none()
+                        {
+                            stop.store(true, Ordering::Relaxed);
+                            breaker = Some(format!(
+                                "{consecutive} consecutive boundary fetches failed with zero successes; this looks like a systematic problem (server unreachable, wrong token, or a bad base URL), not a handful of bad boundary URLs. Last failure: {detail}. Pass --max-consecutive-failures 0 to disable this check."
+                            ));
+                        }
+                    }
+                }
+                cursor += 1;
+                if total >= PROGRESS_MIN_ITEMS
+                    && (cursor.is_multiple_of(interval) || cursor == total)
+                {
+                    eprintln!(
+                        "resolved {cursor}/{total} boundaries ({} failed)",
+                        summary.failed
+                    );
+                }
+            }
+            if breaker.is_some() {
+                break;
+            }
+        }
+        // Drain whatever the still-running workers send after the trip so they can exit.
+        if breaker.is_some() {
+            for _ in rx.iter() {}
+        }
+    });
+
+    eprintln!(
+        "boundaries: {} cached, {} fetched, {} failed",
+        summary.cached, summary.fetched, summary.failed
+    );
+    match breaker {
+        Some(msg) => Err(KilnError::Environment(msg)),
+        None => Ok(summary),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extract::cache::Cache;
+    use crate::extract::client::FhirClient;
+    use crate::report::Report;
+    use httptest::{matchers::*, responders::*, Expectation, Server};
+
+    fn client(retries: usize) -> FhirClient {
+        FhirClient::new(None, retries, std::time::Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn binary_resources_are_decoded_and_raw_bodies_pass_through() {
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"{\"type\":\"Point\"}",
+        );
+        let bin = format!(
+            r#"{{"resourceType":"Binary","contentType":"application/geo+json","data":"{b64}"}}"#
+        );
+        assert_eq!(
+            extract_payload(bin.as_bytes()).unwrap(),
+            b"{\"type\":\"Point\"}"
+        );
+        assert_eq!(
+            extract_payload(b"{\"type\":\"Polygon\"}").unwrap(),
+            b"{\"type\":\"Polygon\"}"
+        );
+        assert_eq!(
+            extract_payload(b"not json at all").unwrap(),
+            b"not json at all"
+        );
+        assert!(extract_payload(br#"{"resourceType":"Binary"}"#)
+            .unwrap_err()
+            .contains("no data"));
+        assert!(extract_payload(br#"{"resourceType":"Binary","data":"!!"}"#)
+            .unwrap_err()
+            .contains("base64"));
+    }
+
+    #[test]
+    fn fetches_into_the_cache_and_counts_in_order() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/ok"))
+                .times(1)
+                .respond_with(status_code(200).body("{\"type\":\"Point\"}")),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/missing"))
+                .times(1)
+                .respond_with(status_code(404)),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        cache
+            .write(&server.url("/cached").to_string(), b"c")
+            .unwrap();
+        let urls = vec![
+            server.url("/ok").to_string(),
+            server.url("/missing").to_string(),
+            server.url("/cached").to_string(),
+        ];
+        let mut report = Report::default();
+        let opts = FetchOptions {
+            concurrency: 2,
+            cache: Some(cache.clone()),
+            refresh: false,
+            max_consecutive_failures: 50,
+        };
+        let summary = fetch_boundaries(&client(1), &urls, &opts, &mut report).unwrap();
+        assert_eq!((summary.cached, summary.fetched, summary.failed), (1, 1, 1));
+        assert_eq!(
+            cache.read(&urls[0]).unwrap(),
+            Some(b"{\"type\":\"Point\"}".to_vec())
+        );
+        assert!(summary.failures[&urls[1]].contains("404"));
+        assert!(summary.in_memory.is_empty());
+        assert_eq!(
+            report.count("boundary_fetch_failed"),
+            0,
+            "failures are reported per resource by the merge, not here"
+        );
+    }
+
+    #[test]
+    fn refresh_skips_cache_reads_but_writes_back() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/b"))
+                .times(1)
+                .respond_with(status_code(200).body("new")),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        let url = server.url("/b").to_string();
+        cache.write(&url, b"old").unwrap();
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: Some(cache.clone()),
+            refresh: true,
+            max_consecutive_failures: 0,
+        };
+        let summary = fetch_boundaries(
+            &client(1),
+            std::slice::from_ref(&url),
+            &opts,
+            &mut Report::default(),
+        )
+        .unwrap();
+        assert_eq!((summary.cached, summary.fetched), (0, 1));
+        assert_eq!(cache.read(&url).unwrap(), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn no_cache_keeps_bytes_in_memory() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/ok"))
+                .respond_with(status_code(200).body("g")),
+        );
+        let urls = vec![server.url("/ok").to_string()];
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: None,
+            refresh: false,
+            max_consecutive_failures: 0,
+        };
+        let summary = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap();
+        assert_eq!(
+            summary.in_memory.get(&urls[0]).map(|v| v.as_slice()),
+            Some(&b"g"[..])
+        );
+    }
+
+    #[test]
+    fn a_corrupt_cache_entry_is_reported_and_refetched() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/c"))
+                .times(1)
+                .respond_with(status_code(200).body("fresh")),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path());
+        let url = server.url("/c").to_string();
+        cache.write(&url, b"x").unwrap();
+        std::fs::write(
+            dir.path()
+                .join(format!("{}.bin", crate::extract::cache::cache_key(&url))),
+            b"tampered",
+        )
+        .unwrap();
+        let mut report = Report::default();
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: Some(cache.clone()),
+            refresh: false,
+            max_consecutive_failures: 0,
+        };
+        let summary =
+            fetch_boundaries(&client(1), std::slice::from_ref(&url), &opts, &mut report).unwrap();
+        assert_eq!(summary.fetched, 1);
+        assert_eq!(report.count("cache_error"), 1);
+        assert_eq!(
+            cache.read(&url).unwrap(),
+            Some(b"fresh".to_vec()),
+            "rewritten"
+        );
+    }
+
+    #[test]
+    fn breaker_trips_on_consecutive_failures_with_no_success() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/dead"))
+                .times(..)
+                .respond_with(status_code(500)),
+        );
+        let urls: Vec<String> = (0..10)
+            .map(|i| server.url(&format!("/dead?i={i}")).to_string())
+            .collect();
+        let opts = FetchOptions {
+            concurrency: 2,
+            cache: None,
+            refresh: false,
+            max_consecutive_failures: 3,
+        };
+        let err = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert!(
+            err.to_string().contains("--max-consecutive-failures"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn breaker_does_not_trip_after_one_success_and_zero_disables_it() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/ok"))
+                .respond_with(status_code(200).body("g")),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/dead"))
+                .times(..)
+                .respond_with(status_code(500)),
+        );
+        let mut urls = vec![server.url("/ok").to_string()];
+        urls.extend((0..5).map(|i| server.url(&format!("/dead?i={i}")).to_string()));
+        let opts = FetchOptions {
+            concurrency: 1,
+            cache: None,
+            refresh: false,
+            max_consecutive_failures: 2,
+        };
+        let summary = fetch_boundaries(&client(1), &urls, &opts, &mut Report::default()).unwrap();
+        assert_eq!((summary.fetched, summary.failed), (1, 5));
+        let dead: Vec<String> = (0..5)
+            .map(|i| server.url(&format!("/dead?i={i}")).to_string())
+            .collect();
+        let opts = FetchOptions {
+            concurrency: 2,
+            cache: None,
+            refresh: false,
+            max_consecutive_failures: 0,
+        };
+        let summary = fetch_boundaries(&client(1), &dead, &opts, &mut Report::default()).unwrap();
+        assert_eq!(summary.failed, 5);
+    }
+
+    #[test]
+    fn empty_work_list_is_fine() {
+        let opts = FetchOptions {
+            concurrency: 4,
+            cache: None,
+            refresh: false,
+            max_consecutive_failures: 5,
+        };
+        let summary = fetch_boundaries(&client(1), &[], &opts, &mut Report::default()).unwrap();
+        assert_eq!((summary.cached, summary.fetched, summary.failed), (0, 0, 0));
+    }
+}
