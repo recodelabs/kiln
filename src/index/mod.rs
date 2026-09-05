@@ -1,3 +1,4 @@
+pub mod build;
 pub mod hierarchy;
 pub mod hilbert;
 pub mod partition;
@@ -23,4 +24,5 @@ pub struct IndexRecord {
     pub hilbert: u64,
 }
 
+pub use build::{build_index, Index, UNKNOWN_COUNTRY};
 pub use hierarchy::{resolve_hierarchy, Hierarchy, HierarchyInfo, NodeIdx, ADMIN_COLUMNS};
