@@ -8,3 +8,4 @@ dist/
 out/
 /*.ndjson
 /.worktrees
+/target
