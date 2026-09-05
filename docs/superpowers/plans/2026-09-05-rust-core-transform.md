@@ -3497,7 +3497,7 @@ git commit -m "Add kiln inspect: summarise partitions, row groups and geo metada
 **Files:**
 - Create: `tests/generate_snapshot.rs` (an ignored test that generates a large snapshot), `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Add a generator for a large synthetic snapshot**
+- [x] **Step 1: Add a generator for a large synthetic snapshot**
 
 `tests/generate_snapshot.rs`:
 
@@ -3567,7 +3567,7 @@ fn generate() {
 
 Add `base64` to `[dev-dependencies]` in `Cargo.toml` if it is only listed under `[dependencies]` (it is listed there already, which makes it available to integration tests too; no change needed).
 
-- [ ] **Step 2: Measure**
+- [x] **Step 2: Measure**
 
 Run:
 ```bash
@@ -3577,7 +3577,7 @@ cargo build --release
 ```
 Expected: completes; note wall time and maximum resident set size. Record both numbers in the commit message. The README target is that peak memory stays in the low hundreds of megabytes for two hundred thousand rows; if it is over one gigabyte, profile before continuing: the likely culprits are `fhir_json` strings being kept in the index (they must not be) or `groups` holding cloned partition values per row.
 
-- [ ] **Step 3: Add CI**
+- [x] **Step 3: Add CI**
 
 `.github/workflows/ci.yml`:
 
@@ -3626,7 +3626,7 @@ jobs:
 
 The aarch64 musl cross build may need a linker set via `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc` in the build step's `env`; add it if that job fails on the linker.
 
-- [ ] **Step 4: Format and commit**
+- [x] **Step 4: Format and commit**
 
 ```bash
 cargo fmt
