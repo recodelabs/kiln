@@ -194,7 +194,7 @@ fn full_extract_writes_snapshot_state_and_inlines_boundaries() {
 }
 
 #[test]
-fn second_run_is_incremental_and_uses_the_cache() {
+fn second_run_with_nothing_new_leaves_the_snapshot_byte_identical() {
     let server = Server::run();
     let snap = tempfile::tempdir().unwrap();
     let burl = server.url("/b/b.geojson").to_string();
@@ -483,6 +483,23 @@ fn conflicting_flags_and_a_bad_since_are_usage_errors() {
         .failure()
         .code(2);
     assert!(stderr(&d).contains("--concurrency"), "{}", stderr(&d));
+
+    let e = extract(
+        &server,
+        snap.path(),
+        &["--full", "--since", "2026-01-01T00:00:00Z"],
+    )
+    .failure()
+    .code(2);
+    assert!(stderr(&e).contains("--since"), "{}", stderr(&e));
+
+    // A --snapshot that cannot be a directory is the operator's mistake.
+    let file = snap.path().join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    let f = extract_at(&server.url("/fhir").to_string(), &file, &[])
+        .failure()
+        .code(2);
+    assert!(stderr(&f).contains("--snapshot"), "{}", stderr(&f));
 }
 
 #[test]
@@ -533,4 +550,238 @@ fn no_cache_still_inlines() {
     let rows = lines(snap.path());
     assert_eq!(inlined_bytes(&rows[0]), GEOJSON.as_bytes());
     assert!(!snap.path().join("boundaries").exists());
+}
+
+#[test]
+fn second_run_hits_the_cache() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let burl = server.url("/b/b.geojson").to_string();
+    let rows = vec![loc("b", "2026-01-02T00:00:00Z", Some(&burl))];
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(rows.clone(), None))),
+    );
+    // The `ge` comparison refetches the row that set the watermark.
+    server.expect(
+        Expectation::matching(since_search("2026-01-02T00:00:00Z"))
+            .times(1)
+            .respond_with(ok(bundle(rows, None))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/b.geojson"))
+            .times(1)
+            .respond_with(status_code(200).body(GEOJSON)),
+    );
+
+    extract(&server, snap.path(), &[]).success();
+    let second = extract(&server, snap.path(), &[]).success();
+    let err = stderr(&second);
+    assert!(
+        err.contains("boundaries: 1 cached, 0 fetched, 0 failed"),
+        "{err}"
+    );
+    let out = stdout(&second);
+    assert!(out.contains("1 resources, 0 new, 1 updated"), "{out}");
+    assert_eq!(inlined_bytes(&lines(snap.path())[0]), GEOJSON.as_bytes());
+}
+
+#[test]
+fn a_401_on_the_search_keeps_the_old_snapshot() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(
+                vec![loc("a", "2026-01-01T00:00:00Z", None)],
+                None,
+            ))),
+    );
+    server.expect(
+        Expectation::matching(since_search("2026-01-01T00:00:00Z"))
+            .times(1)
+            .respond_with(status_code(401).body("no token for you")),
+    );
+
+    extract(&server, snap.path(), &[]).success();
+    let before = std::fs::read(snap.path().join("locations.ndjson")).unwrap();
+    let state_before = std::fs::read(snap.path().join("state.json")).unwrap();
+
+    let assert = extract(&server, snap.path(), &[]).failure().code(1);
+    assert!(stderr(&assert).contains("401"), "{}", stderr(&assert));
+    assert_eq!(
+        std::fs::read(snap.path().join("locations.ndjson")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(snap.path().join("state.json")).unwrap(),
+        state_before
+    );
+    assert!(!snap.path().join(".incoming.ndjson").exists());
+}
+
+#[test]
+fn cache_dir_is_shared_between_snapshots() {
+    let server = Server::run();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let burl = server.url("/b/b.geojson").to_string();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(2)
+            .respond_with(ok(bundle(
+                vec![loc("b", "2026-01-02T00:00:00Z", Some(&burl))],
+                None,
+            ))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/b.geojson"))
+            .times(1)
+            .respond_with(status_code(200).body(GEOJSON)),
+    );
+
+    extract(&server, a.path(), &[]).success();
+    let shared = a.path().join("boundaries");
+    let second = extract(
+        &server,
+        b.path(),
+        &["--cache-dir", shared.to_str().unwrap()],
+    )
+    .success();
+    let err = stderr(&second);
+    assert!(
+        err.contains("boundaries: 1 cached, 0 fetched, 0 failed"),
+        "{err}"
+    );
+    assert_eq!(inlined_bytes(&lines(b.path())[0]), GEOJSON.as_bytes());
+    assert!(!b.path().join("boundaries").exists());
+}
+
+#[test]
+fn a_python_written_cache_entry_is_honoured() {
+    use sha2::{Digest, Sha256};
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let burl = server.url("/b/b.geojson").to_string();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(
+                vec![loc("b", "2026-01-02T00:00:00Z", Some(&burl))],
+                None,
+            ))),
+    );
+    // The boundary endpoint must never be touched.
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/b.geojson"))
+            .times(0)
+            .respond_with(status_code(500)),
+    );
+
+    let dir = snap.path().join("boundaries");
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = hex(&Sha256::digest(burl.as_bytes()));
+    std::fs::write(dir.join(format!("{key}.bin")), GEOJSON).unwrap();
+    std::fs::write(
+        dir.join(format!("{key}.meta.json")),
+        serde_json::to_string(&json!({
+            "url": burl,
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "sha256": hex(&Sha256::digest(GEOJSON.as_bytes())),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let assert = extract(&server, snap.path(), &[]).success();
+    let err = stderr(&assert);
+    assert!(
+        err.contains("boundaries: 1 cached, 0 fetched, 0 failed"),
+        "{err}"
+    );
+    assert_eq!(inlined_bytes(&lines(snap.path())[0]), GEOJSON.as_bytes());
+}
+
+#[test]
+fn refresh_with_a_failing_refetch_reports_stale_cache() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let burl = server.url("/b/b.geojson").to_string();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(2)
+            .respond_with(ok(bundle(
+                vec![loc("b", "2026-01-02T00:00:00Z", Some(&burl))],
+                None,
+            ))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/b.geojson"))
+            .times(2)
+            .respond_with(cycle![
+                status_code(200).body(GEOJSON),
+                status_code(500).body("boom"),
+            ]),
+    );
+
+    extract(&server, snap.path(), &[]).success();
+    extract(
+        &server,
+        snap.path(),
+        &["--full", "--refresh", "--retries", "1"],
+    )
+    .success();
+
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["counts"]["boundary_stale_from_cache"], 1, "{report}");
+    assert!(
+        report["counts"]["boundary_fetch_failed"].is_null(),
+        "{report}"
+    );
+    // The last known good copy is still inlined.
+    assert_eq!(inlined_bytes(&lines(snap.path())[0]), GEOJSON.as_bytes());
+}
+
+#[test]
+fn a_boundary_404_leaves_the_url_and_reports() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let burl = server.url("/b/b.geojson").to_string();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(
+                vec![loc("b", "2026-01-02T00:00:00Z", Some(&burl))],
+                None,
+            ))),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/b/b.geojson"))
+            .times(1)
+            .respond_with(status_code(404).body("gone")),
+    );
+
+    let assert = extract(&server, snap.path(), &[]).success();
+    let err = stderr(&assert);
+    assert!(
+        err.contains("boundaries: 0 cached, 0 fetched, 1 failed"),
+        "{err}"
+    );
+    let rows = lines(snap.path());
+    assert_eq!(attachment(&rows[0])["url"], burl);
+    assert!(attachment(&rows[0])["data"].is_null());
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["counts"]["boundary_fetch_failed"], 1, "{report}");
 }
