@@ -302,12 +302,25 @@ rules follow:
 out/
   locations/
     country=NG/
-      geom_type=polygon/part-0.parquet
-      geom_type=point/part-0.parquet
+      geom_type=polygon/
+        type=admin-unit/part-0.parquet
+        type=settlement/part-0.parquet
+      geom_type=point/
+        type=facility/part-0.parquet
+        type=settlement/part-0.parquet
   _report.json
 ```
 
-Partitioned by country and geometry type only. Within each file, rows are
+Partitioned by country, geometry type and Location type, so every kind of
+place is its own file: open the facilities file in QGIS as one layer, or the
+settlements file, without filtering, and the whole tree still reads as one
+dataset in DuckDB or GDAL with the partition values as columns. Geometry type
+stays in the split so a layer never mixes polygons and points, which QGIS
+handles poorly; a type that occurs as both, such as settlements, gets one
+file of each. `--partition-by` changes the split: `country,type` puts all
+settlements in one file, `country,geom_type` is the two-file layout, and
+`tier` splits admin units by level. A type with fewer than 100 rows is still
+written, and reported as `small_partition`. Within each file, rows are
 sorted along a Hilbert curve so that places near each other on the ground sit
 near each other on disk, and every row group carries its bounding box in the
 Parquet geospatial statistics. A reader asking for one district touches a few
@@ -649,8 +662,8 @@ output:
 
 - On demand: DuckDB's `ST_AsMVT` cuts a Mapbox Vector Tile per request from
   the parquet, behind a tiny tile server or in the browser with DuckDB WASM.
-- Pre baked: tippecanoe over the polygon and point partitions produces a
-  PMTiles archive for fully static hosting.
+- Pre baked: tippecanoe over the partition files, one layer per Location
+  type, produces a PMTiles archive for fully static hosting.
 
 Both are a few lines of glue outside kiln, and both are rebuilt from the same
 parquet after every transform.

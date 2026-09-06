@@ -20,7 +20,7 @@ fn transform_writes_dataset_and_report() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("Wrote 8 rows across 3 partitions"),
+        stdout.contains("Wrote 8 rows across 4 partitions"),
         "{stdout}"
     );
     assert!(stdout.contains("cycle: 2"), "{stdout}");
@@ -33,7 +33,7 @@ fn transform_writes_dataset_and_report() {
     assert_eq!(report["counts"]["duplicate_pcode"], 1);
     assert!(out
         .path()
-        .join("locations/country=NG/geom_type=polygon/part-0.parquet")
+        .join("locations/country=NG/geom_type=polygon/type=admin-unit/part-0.parquet")
         .exists());
 }
 
@@ -206,12 +206,13 @@ fn inspect_summarises_a_written_dataset() {
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("8 rows across 3 partitions"), "{stdout}");
+    assert!(stdout.contains("8 rows across 4 partitions"), "{stdout}");
     assert!(
-        stdout.contains("locations/country=NG/geom_type=polygon/part-0.parquet"),
+        stdout.contains("locations/country=NG/geom_type=polygon/type=admin-unit/part-0.parquet"),
         "{stdout}"
     );
-    assert!(stdout.contains("row_groups=3"), "{stdout}");
+    // Four admin-unit polygons at two rows per group.
+    assert!(stdout.contains("row_groups=2"), "{stdout}");
     assert!(stdout.contains("geo=1.1.0 covering=true"), "{stdout}");
     assert!(stdout.contains("types=Polygon"), "{stdout}");
 }
@@ -266,7 +267,7 @@ fn inspect_ignores_stale_staging_and_backup_dirs() {
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("8 rows across 3 partitions"), "{stdout}");
+    assert!(stdout.contains("8 rows across 4 partitions"), "{stdout}");
     assert!(!stdout.contains(".locations"), "{stdout}");
 }
 

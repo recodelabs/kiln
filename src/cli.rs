@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 20_000;
-pub const DEFAULT_PARTITION_BY: &str = "country,geom_type";
+pub const DEFAULT_PARTITION_BY: &str = "country,geom_type,type";
 pub const DEFAULT_CONCURRENCY: usize = 8;
 pub const DEFAULT_RETRIES: usize = 3;
 pub const DEFAULT_MAX_CONSECUTIVE_FAILURES: usize = 50;
