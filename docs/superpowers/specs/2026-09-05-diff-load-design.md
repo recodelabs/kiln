@@ -1,7 +1,7 @@
 # kiln diff and load — design (plan 3 of the Rust rewrite)
 
 **Date:** 2026-09-05
-**Status:** Draft, awaiting review before the implementation plan is written.
+**Status:** Approved 2026-09-05; implementation plan `docs/superpowers/plans/2026-09-05-rust-diff-load.md`, branch `rust-diff-load`.
 **Builds on:** README.md ("Round trip: diff and load", "Columns", "What is writable"), plan 1 (`transform`, `inspect`, PR #8), plan 2 (`extract`, `run`, PR #9)
 
 ## Problem
