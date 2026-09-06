@@ -13,6 +13,7 @@ use crate::fhir::location::{
     FACILITY_TYPE_SYSTEM, GEOJSON_CONTENT_TYPE, GERS_SYSTEM, OWNERSHIP_SYSTEM, PCODE_SYSTEM,
     PCODE_SYSTEMS, SETTLEMENT_TYPE_EXTENSION_URL,
 };
+use crate::fhir::organization::{NHFR_CODE_SYSTEM, NHFR_UID_SYSTEM, ORGANIZATION_TYPE_SYSTEM};
 use crate::fhir::{Boundary, Location};
 use crate::geometry::{kind_name, parse_boundary, validity};
 use crate::report::Report;
@@ -474,6 +475,121 @@ fn apply_geometry(
     }
 }
 
+/// True when the row carries `column` with a value different from what
+/// the snapshot Location has. An unedited export repeats every column;
+/// only a real edit may reach the Organization, so drift between the two
+/// resources is never "corrected" by accident.
+fn edited(row: &InputRow, column: &str, current: Option<&str>) -> bool {
+    match row.columns.get(column) {
+        None => false,
+        Some(ColumnValue::Null) => current.is_some(),
+        Some(ColumnValue::Text(t)) => Some(t.as_str()) != current,
+        Some(_) => false,
+    }
+}
+
+/// `text` on the concept in `type` that holds a coding under `system`.
+fn set_concept_text(
+    obj: &mut Object,
+    system: &str,
+    text: Option<&str>,
+    id: &str,
+    column: &str,
+    report: &mut Report,
+) {
+    let concept = obj
+        .get_mut("type")
+        .and_then(Value::as_array_mut)
+        .and_then(|types| {
+            types.iter_mut().filter_map(Value::as_object_mut).find(|c| {
+                c.get("coding")
+                    .and_then(Value::as_array)
+                    .is_some_and(|cs| cs.iter().any(|x| system_is(x, system)))
+            })
+        });
+    match (concept, text) {
+        (Some(c), Some(t)) => {
+            c.insert("text".into(), Value::String(t.to_string()));
+        }
+        (Some(c), None) => {
+            c.remove("text");
+        }
+        (None, Some(_)) => report.add(
+            "input_column_type",
+            id,
+            &format!("{column}: the Organization has no coding under {system} to label; ignored"),
+        ),
+        (None, None) => {}
+    }
+}
+
+/// The Organization half of a facility row. `name`, `status`, facility
+/// level and ownership mirror from the Location columns when edited (or
+/// always, for a create); the NHFR codes, the type labels and the whole
+/// `organization_identifier` list are Organization-only and apply as given.
+pub fn rebuild_organization(
+    base: &Value,
+    row: &InputRow,
+    snapshot: Option<&Location>,
+    report: &mut Report,
+) -> Value {
+    let mut obj = base.as_object().cloned().unwrap_or_default();
+    let id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>")
+        .to_string();
+    let mirror =
+        |column: &str, current: Option<&str>| snapshot.is_none() || edited(row, column, current);
+    if let Some(v) = row.columns.get("organization_identifier") {
+        apply_identifier_list(&mut obj, v);
+    }
+    for (name, value) in &row.columns {
+        let t = text_of(value);
+        match name.as_str() {
+            "name" if mirror("name", snapshot.and_then(|l| l.name.as_deref())) => {
+                set_string(&mut obj, "name", t)
+            }
+            "status" if mirror("status", snapshot.and_then(|l| l.status.as_deref())) => {
+                if let Some(s) = t {
+                    obj.insert("active".into(), Value::Bool(s == "active"));
+                }
+            }
+            "facility_level"
+                if mirror(
+                    "facility_level",
+                    snapshot.and_then(|l| l.facility_level.as_deref()),
+                ) =>
+            {
+                upsert_type_coding(&mut obj, FACILITY_TYPE_SYSTEM, t)
+            }
+            "ownership" if mirror("ownership", snapshot.and_then(|l| l.ownership.as_deref())) => {
+                upsert_type_coding(&mut obj, OWNERSHIP_SYSTEM, t)
+            }
+            "facility_level_text" => {
+                set_concept_text(&mut obj, FACILITY_TYPE_SYSTEM, t, &id, name, report)
+            }
+            "ownership_text" => set_concept_text(&mut obj, OWNERSHIP_SYSTEM, t, &id, name, report),
+            "nhfr_code" => upsert_identifier(&mut obj, NHFR_CODE_SYSTEM, t),
+            "nhfr_uid" => upsert_identifier(&mut obj, NHFR_UID_SYSTEM, t),
+            _ => {}
+        }
+    }
+    Value::Object(obj)
+}
+
+/// The Organization for a new facility row: the pairing shape bake used,
+/// then the row's columns on top.
+pub fn new_organization(org_id: &str, row: &InputRow, report: &mut Report) -> Value {
+    let base = json!({
+        "resourceType": "Organization",
+        "id": org_id,
+        "active": true,
+        "type": [{"coding": [{"system": ORGANIZATION_TYPE_SYSTEM, "code": "prov", "display": "Healthcare Provider"}]}],
+    });
+    rebuild_organization(&base, row, None, report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +598,80 @@ mod tests {
     use serde_json::json;
 
     use crate::fhir::location::{BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS};
+
+    fn org_base() -> Value {
+        json!({"resourceType":"Organization","id":"org-a","active":true,"name":"A","meta":{"versionId":"9"},
+            "identifier":[{"system":NHFR_CODE_SYSTEM,"value":"05/08/1"}],
+            "type":[{"coding":[{"system":ORGANIZATION_TYPE_SYSTEM,"code":"prov"}]},
+                    {"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"primary"}],"text":"Health Post"}]})
+    }
+
+    fn snapshot_location() -> Location {
+        Location::parse(
+            &json!({"resourceType":"Location","id":"a","name":"A","status":"active","managingOrganization":{"reference":"Organization/org-a"}}),
+            &mut Report::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mirrored_columns_reach_the_organization_only_when_edited() {
+        let mut report = Report::default();
+        let loc = snapshot_location();
+        // Unedited name and status, and a facility level the Location never had: no change.
+        let same = row(&[("name", text("A")), ("status", text("active")), ("facility_level", ColumnValue::Null)]);
+        assert_eq!(rebuild_organization(&org_base(), &same, Some(&loc), &mut report), org_base());
+        // Edited name and status.
+        let edited = row(&[("name", text("B")), ("status", text("inactive"))]);
+        let out = rebuild_organization(&org_base(), &edited, Some(&loc), &mut report);
+        assert_eq!(out["name"], "B");
+        assert_eq!(out["active"], false);
+        assert_eq!(out["meta"]["versionId"], "9");
+        // Facility level edited on the row: the Organization's coding follows.
+        let out = rebuild_organization(&org_base(), &row(&[("facility_level", text("secondary"))]), Some(&loc), &mut report);
+        assert_eq!(out["type"][1]["coding"][0]["code"], "secondary");
+        assert_eq!(out["type"][1]["text"], "Health Post", "the label is untouched");
+    }
+
+    #[test]
+    fn organization_only_columns_apply_directly() {
+        let mut report = Report::default();
+        let loc = snapshot_location();
+        let r = row(&[
+            ("nhfr_code", text("05/08/2")),
+            ("nhfr_uid", text("999")),
+            ("facility_level_text", text("Clinic")),
+            ("ownership_text", text("Private")),
+        ]);
+        let out = rebuild_organization(&org_base(), &r, Some(&loc), &mut report);
+        assert_eq!(out["identifier"], json!([{"system":NHFR_CODE_SYSTEM,"value":"05/08/2"},{"system":NHFR_UID_SYSTEM,"value":"999"}]));
+        assert_eq!(out["type"][1]["text"], "Clinic");
+        assert_eq!(report.count("input_column_type"), 1, "no ownership coding to label");
+        let out = rebuild_organization(&org_base(), &row(&[("facility_level_text", ColumnValue::Null)]), Some(&loc), &mut report);
+        assert!(out["type"][1].get("text").is_none());
+        let out = rebuild_organization(
+            &org_base(),
+            &row(&[("organization_identifier", ColumnValue::Identifiers(vec![Identifier { system: Some("s".into()), value: Some("v".into()) }]))]),
+            Some(&loc),
+            &mut report,
+        );
+        assert_eq!(out["identifier"], json!([{"system":"s","value":"v"}]));
+    }
+
+    #[test]
+    fn a_new_organization_carries_the_pairing_shape() {
+        let mut report = Report::default();
+        let r = row(&[("name", text("New Site")), ("facility_level", text("primary")), ("facility_level_text", text("Health Post")), ("nhfr_code", text("05/09"))]);
+        let out = new_organization("org-new", &r, &mut report);
+        assert_eq!(out["resourceType"], "Organization");
+        assert_eq!(out["id"], "org-new");
+        assert_eq!(out["active"], true);
+        assert_eq!(out["name"], "New Site");
+        assert_eq!(out["type"][0]["coding"][0]["code"], "prov");
+        assert_eq!(out["type"][1], json!({"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"primary"}],"text":"Health Post"}));
+        assert_eq!(out["identifier"], json!([{"system":NHFR_CODE_SYSTEM,"value":"05/09"}]));
+        assert!(out.get("meta").is_none());
+    }
 
     fn row(cols: &[(&str, ColumnValue)]) -> InputRow {
         InputRow {

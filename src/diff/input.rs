@@ -9,7 +9,7 @@ use serde_json::Value;
 
 pub use crate::fhir::location::Identifier;
 
-pub const TEXT_COLUMNS: [&str; 13] = [
+pub const TEXT_COLUMNS: [&str; 17] = [
     "name",
     "status",
     "description",
@@ -23,10 +23,16 @@ pub const TEXT_COLUMNS: [&str; 13] = [
     "delivery_strategy",
     "facility_level",
     "ownership",
+    "nhfr_code",
+    "nhfr_uid",
+    "facility_level_text",
+    "ownership_text",
 ];
 pub const NUMBER_COLUMNS: [&str; 2] = ["position_longitude", "position_latitude"];
 pub const ALIAS_COLUMN: &str = "alias";
 pub const IDENTIFIER_COLUMN: &str = "identifier";
+/// Whole-list identifier columns: the Location's and the Organization's.
+pub const IDENTIFIER_COLUMNS: [&str; 2] = ["identifier", "organization_identifier"];
 pub const ID_COLUMN: &str = "id";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +60,7 @@ pub fn is_writable(name: &str) -> bool {
     TEXT_COLUMNS.contains(&name)
         || NUMBER_COLUMNS.contains(&name)
         || name == ALIAS_COLUMN
-        || name == IDENTIFIER_COLUMN
+        || IDENTIFIER_COLUMNS.contains(&name)
 }
 
 fn text_list(v: &Value) -> Result<ColumnValue, String> {
@@ -143,7 +149,7 @@ pub fn column_from_json(name: &str, v: &Value) -> Result<ColumnValue, String> {
     if name == ALIAS_COLUMN {
         return list_or_json_string(v, text_list);
     }
-    if name == IDENTIFIER_COLUMN {
+    if IDENTIFIER_COLUMNS.contains(&name) {
         return list_or_json_string(v, identifiers);
     }
     Err(format!("{name} is not a writable column"))
@@ -164,6 +170,10 @@ mod tests {
         assert!(!is_writable("version_id"));
         assert!(!is_writable("id"));
         assert!(!is_writable("geometry"));
+        assert!(is_writable("nhfr_code"));
+        assert!(is_writable("facility_level_text"));
+        assert!(is_writable("organization_identifier"));
+        assert!(!is_writable("organization_json"));
     }
 
     #[test]
@@ -201,6 +211,7 @@ mod tests {
         let list = json!([{"system": "s", "value": "v"}, {"value": "w"}]);
         assert_eq!(column_from_json("identifier", &list), want);
         assert_eq!(column_from_json("identifier", &json!(list.to_string())), want);
+        assert_eq!(column_from_json("organization_identifier", &list), want);
         assert!(column_from_json("identifier", &json!(["s|v"])).is_err());
     }
 }

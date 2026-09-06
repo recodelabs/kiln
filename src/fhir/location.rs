@@ -84,7 +84,7 @@ pub(crate) fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> Opti
 
 /// `Location/loc-1` -> `loc-1`; bare ids pass through. An empty reference, or
 /// one ending in `/`, has no usable id and yields `None`.
-fn strip_reference(reference: &str) -> Option<String> {
+pub(crate) fn strip_reference(reference: &str) -> Option<String> {
     let last = reference.rsplit('/').next().unwrap_or(reference);
     if last.is_empty() {
         None

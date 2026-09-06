@@ -19,14 +19,16 @@ use serde_json::{json, Value};
 use crate::cli::DiffArgs;
 use crate::diff::compare::canonical;
 use crate::diff::geojson::{feature_to_row, read_feature_collection, read_feature_lines};
-use crate::diff::input::InputRow;
+use crate::diff::input::{ColumnValue, InputRow};
 use crate::diff::parquet::read_geoparquet;
-use crate::diff::rebuild::rebuild;
+use crate::diff::rebuild::{new_organization, rebuild, rebuild_organization};
 use crate::error::{KilnError, Result};
+use crate::fhir::location::strip_reference;
 use crate::fhir::ndjson::LineAccess;
 use crate::fhir::Location;
 use crate::report::Report;
 use crate::snapshot::index::index_by_id;
+use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::transform::{write_report, SNAPSHOT_FILE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,11 +62,16 @@ pub struct DiffStats {
     pub changed: usize,
     pub unchanged: usize,
     pub created: usize,
+    /// Resources written, by type.
+    pub locations: usize,
+    pub organizations: usize,
 }
 
 struct Diff<'a> {
     index: HashMap<String, (u64, usize)>,
     access: LineAccess,
+    /// The Organization side of the facility pairing, when the snapshot has it.
+    organizations: Option<(HashMap<String, (u64, usize)>, LineAccess)>,
     out: BufWriter<File>,
     out_path: &'a Path,
     seen: HashSet<String>,
@@ -113,16 +120,69 @@ impl Diff<'_> {
                 (json!({"resourceType": "Location", "id": id}), None)
             }
         };
-        let rebuilt = rebuild(&base, snapshot.as_ref(), &row, report);
-        if existing.is_some() && canonical(&rebuilt) == canonical(&base) {
-            self.stats.unchanged += 1;
-            return Ok(());
+        let mut rebuilt = rebuild(&base, snapshot.as_ref(), &row, report);
+        let is_create = existing.is_none();
+        let mut emitted = 0usize;
+
+        // The Organization half, when the snapshot has Organizations.
+        if let Some((org_index, org_access)) = self.organizations.as_mut() {
+            let org_ref = rebuilt
+                .get("managingOrganization")
+                .and_then(|m| m.get("reference"))
+                .and_then(Value::as_str)
+                .and_then(strip_reference);
+            match org_ref {
+                Some(org_id) => match org_index.get(&org_id) {
+                    Some(&(offset, len)) => {
+                        let text = org_access.read_at(offset, len)?;
+                        let org_base: Value = serde_json::from_str(&text)?;
+                        let org_new =
+                            rebuild_organization(&org_base, &row, snapshot.as_ref(), report);
+                        if canonical(&org_new) != canonical(&org_base) {
+                            writeln!(self.out, "{org_new}")
+                                .map_err(|e| KilnError::io(self.out_path, e))?;
+                            self.stats.organizations += 1;
+                            emitted += 1;
+                        }
+                    }
+                    None => report.add(
+                        "organization_missing",
+                        &id,
+                        &format!(
+                            "managingOrganization {org_id} is not in organizations.ndjson; Organization not updated"
+                        ),
+                    ),
+                },
+                None if is_create
+                    && row.columns.get("type") == Some(&ColumnValue::Text("facility".into())) =>
+                {
+                    let org_id = format!("org-{id}");
+                    let org_new = new_organization(&org_id, &row, report);
+                    writeln!(self.out, "{org_new}").map_err(|e| KilnError::io(self.out_path, e))?;
+                    self.stats.organizations += 1;
+                    emitted += 1;
+                    if let Some(obj) = rebuilt.as_object_mut() {
+                        obj.insert(
+                            "managingOrganization".into(),
+                            json!({"reference": format!("Organization/{org_id}")}),
+                        );
+                    }
+                }
+                None => {}
+            }
         }
-        writeln!(self.out, "{rebuilt}").map_err(|e| KilnError::io(self.out_path, e))?;
-        if existing.is_some() {
+
+        if is_create || canonical(&rebuilt) != canonical(&base) {
+            writeln!(self.out, "{rebuilt}").map_err(|e| KilnError::io(self.out_path, e))?;
+            self.stats.locations += 1;
+            emitted += 1;
+        }
+        if is_create {
+            self.stats.created += 1;
+        } else if emitted > 0 {
             self.stats.changed += 1;
         } else {
-            self.stats.created += 1;
+            self.stats.unchanged += 1;
         }
         Ok(())
     }
@@ -191,6 +251,17 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
     let mut report = Report::default();
     let index = index_by_id(&ndjson, &mut report, "snapshot_line_unparsed")?;
     eprintln!("indexed {} snapshot resources", index.len());
+    let org_path = args.snapshot.join(ORGANIZATIONS_FILE);
+    let organizations = if org_path.is_file() {
+        let org_index = index_by_id(&org_path, &mut report, "organization_line_unparsed")?;
+        eprintln!("indexed {} organizations", org_index.len());
+        Some((org_index, LineAccess::open(&org_path)?))
+    } else {
+        eprintln!(
+            "no organizations.ndjson in the snapshot: organisation columns are ignored and no Organizations are written"
+        );
+        None
+    };
 
     let tmp = tmp_path(&args.out);
     let file = File::create(&tmp)
@@ -198,6 +269,7 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
     let mut diff = Diff {
         index,
         access: LineAccess::open(&ndjson)?,
+        organizations,
         out: BufWriter::new(file),
         out_path: &tmp,
         seen: HashSet::new(),
@@ -216,6 +288,10 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
         stats.unchanged,
         stats.created,
         args.out.display()
+    );
+    println!(
+        "Location: {}, Organization: {}",
+        stats.locations, stats.organizations
     );
     if let Some(path) = &args.report {
         write_report(path, &report)?;
