@@ -631,15 +631,14 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_geometry_is_reported_and_left_out() {
-        let mut r = Report::default();
-        let row = feature_to_row(
-            feature(r#"{"type":"Feature","properties":{"id":"a"},"geometry":{"type":"Point","coordinates":[3.25]}}"#),
-            1,
-            &mut r,
-        );
-        assert!(row.geometry.is_none());
-        assert_eq!(r.count("geometry_unparseable"), 1);
+    fn a_malformed_geometry_fails_the_read_as_a_usage_error() {
+        // The geojson crate rejects a one-number position while parsing the
+        // Feature itself, so this never reaches `convert`: the whole read
+        // fails, naming the file, rather than one row being reported.
+        let f = tmp(r#"{"type":"FeatureCollection","features":[
+            {"type":"Feature","properties":{"id":"a"},"geometry":{"type":"Point","coordinates":[3.25]}}]}"#);
+        let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
+        assert!(matches!(&err, KilnError::Usage(m) if m.contains("position")), "{err}");
     }
 
     #[test]
@@ -668,7 +667,7 @@ mod tests {
             Err(KilnError::Usage("stop".into()))
         })
         .unwrap_err();
-        assert!(matches!(err, KilnError::Usage(m) if m == "stop"));
+        assert!(matches!(&err, KilnError::Usage(m) if m == "stop"));
         assert_eq!(calls, 1);
     }
 
@@ -676,7 +675,7 @@ mod tests {
     fn not_a_collection_is_a_usage_error() {
         let f = tmp(r#"{"type":"Feature","properties":{},"geometry":null}"#);
         let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
-        assert!(matches!(err, KilnError::Usage(m) if m.contains("FeatureCollection")), "{err}");
+        assert!(matches!(&err, KilnError::Usage(m) if m.contains("FeatureCollection")), "{err}");
         let f = tmp(r#"[1,2]"#);
         assert!(matches!(read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err(), KilnError::Usage(_)));
     }

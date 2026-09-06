@@ -1,6 +1,7 @@
 //! `kiln diff`: edited GeoJSON or GeoParquet -> FHIR NDJSON of changed Locations.
 
 pub mod compare;
+pub mod geojson;
 pub mod input;
 
 use crate::cli::DiffArgs;
