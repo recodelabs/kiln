@@ -63,25 +63,26 @@ fn validate_positions(value: &GeometryValue) -> Result<bool, ()> {
     }
 }
 
+/// GeoJSON geometry -> 2D `geo` geometry. `Ok((geom, true))` means a
+/// third coordinate was dropped. Shared by the boundary path (which
+/// reports as `boundary_*`) and diff's input path (`geometry_*`).
+pub fn convert(g: geojson::Geometry) -> Result<(Geometry<f64>, bool), String> {
+    let has_extra = validate_positions(&g.value)
+        .map_err(|()| "coordinate position with fewer than 2 numbers".to_string())?;
+    let geom = Geometry::<f64>::try_from(g).map_err(|err| err.to_string())?;
+    Ok((geom, has_extra))
+}
+
 fn to_geo(g: geojson::Geometry, id: &str, report: &mut Report) -> Option<Geometry<f64>> {
-    match validate_positions(&g.value) {
-        Err(()) => {
-            report.add(
-                "boundary_unparseable",
-                id,
-                "coordinate position with fewer than 2 numbers",
-            );
-            return None;
+    match convert(g) {
+        Ok((geom, has_extra)) => {
+            if has_extra {
+                report.add("boundary_z_dropped", id, "3D coordinates flattened to 2D");
+            }
+            Some(geom)
         }
-        Ok(true) => {
-            report.add("boundary_z_dropped", id, "3D coordinates flattened to 2D");
-        }
-        Ok(false) => {}
-    }
-    match Geometry::<f64>::try_from(g) {
-        Ok(geom) => Some(geom),
-        Err(err) => {
-            report.add("boundary_unparseable", id, &err.to_string());
+        Err(msg) => {
+            report.add("boundary_unparseable", id, &msg);
             None
         }
     }

@@ -1,14 +1,14 @@
 //! The one HTTP client. Bearer auth, FHIR accept header, and the retry
-//! policy shared by paging and boundary fetches: connection errors, 5xx and
-//! 429 are retried with exponential backoff (0.5 s doubling, clamped to
-//! [0, 30] s, a numeric Retry-After replacing the computed delay); any other
-//! 4xx is final.
+//! policy shared by paging, boundary fetches and load's bundle posts:
+//! connection errors, 5xx and 429 are retried with exponential backoff
+//! (0.5 s doubling, clamped to [0, 30] s, a numeric Retry-After replacing
+//! the computed delay); any other status is final.
 
 use std::io::Read as _;
 use std::time::Duration;
 
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 
 use crate::error::{KilnError, Result};
 
@@ -148,9 +148,30 @@ impl FhirClient {
 
     /// GET with the retry policy. Sleeps between attempts.
     pub fn get(&self, url: &str) -> std::result::Result<Fetched, FetchError> {
+        self.send(|| self.http.get(url))
+    }
+
+    /// POST a FHIR JSON body with the same retry policy. The body is cloned
+    /// per attempt; bundles are small next to a boundary fetch.
+    pub fn post_json(&self, url: &str, body: Vec<u8>) -> std::result::Result<Fetched, FetchError> {
+        self.send(|| {
+            self.http
+                .post(url)
+                .header(CONTENT_TYPE, "application/fhir+json")
+                .body(body.clone())
+        })
+    }
+
+    /// The retry loop. Any 2xx is a success; 429 and 5xx retry with backoff
+    /// (a numeric Retry-After replaces the computed delay); any other status
+    /// is final on the first response.
+    fn send(
+        &self,
+        request: impl Fn() -> reqwest::blocking::RequestBuilder,
+    ) -> std::result::Result<Fetched, FetchError> {
         let mut last: Option<FetchError> = None;
         for attempt in 1..=self.retries {
-            match self.http.get(url).send() {
+            match request().send() {
                 Err(e) => {
                     last = Some(FetchError::Transport(e.to_string()));
                     if attempt < self.retries {
@@ -174,7 +195,7 @@ impl FhirClient {
                         if attempt < self.retries {
                             std::thread::sleep(delay);
                         }
-                    } else if status != 200 {
+                    } else if !(200..300).contains(&status) {
                         return Err(FetchError::Status {
                             status,
                             body: read_error_body(resp),
@@ -370,5 +391,41 @@ mod tests {
             matches!(err, FetchError::Status { status: 503, .. }),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn post_json_sends_the_body_with_the_fhir_content_type_and_retries() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("POST", "/fhir"),
+                request::headers(contains(("content-type", "application/fhir+json"))),
+                request::body(json_decoded(eq(serde_json::json!({"resourceType": "Bundle"})))),
+            ])
+            .times(2)
+            .respond_with(cycle![status_code(503), status_code(200).body(r#"{"ok":true}"#)]),
+        );
+        let got = client(3)
+            .post_json(&server.url("/fhir").to_string(), br#"{"resourceType":"Bundle"}"#.to_vec())
+            .unwrap();
+        assert_eq!(got.body, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn a_201_is_a_success_and_a_412_is_final() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/created"))
+                .respond_with(status_code(201).body("made")),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("POST", "/stale"))
+                .times(1)
+                .respond_with(status_code(412).body("version conflict")),
+        );
+        let c = client(3);
+        assert_eq!(c.post_json(&server.url("/created").to_string(), b"{}".to_vec()).unwrap().body, b"made");
+        let err = c.post_json(&server.url("/stale").to_string(), b"{}".to_vec()).unwrap_err();
+        assert!(matches!(err, FetchError::Status { status: 412, ref body } if body == "version conflict"), "{err:?}");
     }
 }

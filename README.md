@@ -11,10 +11,9 @@ projection of it.
 It ships as a single static binary with no runtime dependencies: no Python, no
 GDAL, no database. It is designed to run on a laptop in a district office.
 
-> **Status.** `extract`, `transform`, `run` and `inspect` are implemented in
-> Rust and are what this README describes. `diff` and `load` are in progress.
-> Until they land, the Python package under `python/` still provides `bake`,
-> `bake-points` and `load`; it is documented in
+> **Status.** `extract`, `transform`, `run`, `inspect`, `diff` and `load` are
+> implemented in Rust and are what this README describes. The Python package
+> under `python/` still provides `bake` and `bake-points`; it is documented in
 > [python/README.md](python/README.md). A snapshot written by the Python
 > `extract` is accepted by the Rust binary: with no `state.json` it is treated
 > as a full extract on the next run.
@@ -184,8 +183,9 @@ kiln extract   --server URL [--token T] --snapshot DIR
 kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
 kiln run       <extract flags> <transform flags>
 kiln inspect   --out DIR
-kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson
-kiln load      --server URL [--token T] --in CHANGES.ndjson [--dry-run] [--batch-size N]
+kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
+kiln load      --server URL [--token T] --in CHANGES.ndjson
+               [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
 ```
 
 `--token` falls back to `$KILN_TOKEN` and is sent as a bearer token; getting
@@ -520,27 +520,54 @@ kiln diff --snapshot snapshot/ --in edits.geojson --out changes.ndjson
 
 Input is GeoJSON or GeoParquet, detected by extension, with an `id` column.
 GeoJSON is what QGIS exports most naturally; GeoParquet suits DuckDB and
-Python users. Rows with no `id` are treated as new Locations, given a
-generated id, and reported.
+Python users.
+
+The input is detected by extension: `.geojson` or `.json` for a
+FeatureCollection, read one feature at a time so a whole-country export
+never sits in memory; `.geojsonl` or `.geojsons` for one Feature per line;
+`.parquet` for GeoParquet, read one record batch at a time. The row's id is
+the `id` column, or the Feature id when the column is absent. A row with an
+id the snapshot does not have becomes a new Location; a row with no id at
+all is given a UUID and reported as `new_location_generated_id`.
 
 For each row, diff finds the snapshot resource by id and rebuilds what the
 resource *should* now be:
 
-1. Start from the snapshot's full resource (`fhir_json`).
-2. Apply every **writable** column from the input on top of it: name, status,
-   identifiers, position, parent, and so on.
-3. If the input geometry differs from the snapshot geometry, replace the
-   boundary attachment. Comparison is on the WKB after rounding coordinates
-   to seven decimals, so a float round trip through a GIS tool does not
-   register as an edit.
+1. Start from the snapshot's complete resource.
+2. Apply every **writable** column that is present in the input. A column
+   that is absent leaves the field alone. A column that is present and
+   empty removes the field: GIS exports carry every column, so an empty
+   `description` has to mean "clear it" or a cleared field could never
+   round trip. `identifier` is replaced as a whole list, then `pcode` and
+   `gers_id` upsert their entry into it. A list column may arrive as a JSON
+   string, which is how GDAL exports nested fields.
+3. Apply the geometry to what it came from. A row whose snapshot resource
+   has a boundary gets its boundary attachment replaced when the polygon
+   differs; a row without one gets its `position` moved when the point
+   differs. Drawing a polygon on a point row adds a boundary. Drawing a
+   point on a boundary row is reported as `geometry_kind_changed` and
+   skipped, since erasing a boundary that way is not a plausible intent.
+   Comparison is on the WKB after rounding coordinates to seven decimals,
+   so a float round trip through a GIS tool does not register as an edit,
+   and coordinates are written back rounded the same way. Invalid polygons
+   are reported as `geometry_invalid` and written as they are.
 4. Ignore every **derived** column. A stale `admin1_name` in the input never
-   causes a change.
+   causes a change. If the position columns and a point geometry were both
+   edited and disagree, the geometry wins and `position_geometry_disagree`
+   is reported.
 5. Compare the rebuilt resource to the original. If nothing changed, skip it.
 
 What comes out is plain FHIR NDJSON containing only the resources that
-changed, each complete, each carrying the `meta.versionId` it was based on.
-You can inspect it, validate it against the profile, or hand it to someone
-else before anything is sent.
+changed, each complete, each carrying the `meta` it was based on, with a
+new resource carrying none. You can inspect it, validate it against the
+profile, or hand it to someone else before anything is sent. `--report`
+writes the issues found as JSON in the same shape as transform's report;
+the summary is always printed. The kinds are `duplicate_id`,
+`new_location`, `new_location_generated_id`, `input_column_type` (a
+writable column holding a value of the wrong type, ignored for that row),
+`geometry_unparseable`, `geometry_kind_changed`, `geometry_invalid`,
+`position_geometry_disagree`, `boundary_z_dropped` and
+`snapshot_line_unparsed`.
 
 ### load
 
@@ -548,19 +575,27 @@ else before anything is sent.
 kiln load --server URL --token T --in changes.ndjson [--dry-run]
 ```
 
-Load orders resources parents first, groups them into transaction bundles of
-`PUT Location/<id>`, and posts them with retry and backoff. Before the first
-bundle it checks the server's capability statement for update-as-create,
-because `PUT` to a new id needs it and one clear error beats hundreds of
-identical 404s.
+Load reads any NDJSON of FHIR resources with a `resourceType` and an `id`,
+orders them parents first by `partOf`, groups them into transaction bundles
+of `PUT <Type>/<id>`, and posts them with retry and backoff. Before the
+first bundle it fetches the server's capability statement, which also
+proves the URL and token work; if the input creates any new resource, the
+server must advertise update-as-create for that type, because `PUT` to a
+new id needs it and one clear error beats hundreds of identical 404s.
 
-Every entry carries `If-Match` with the versionId from the snapshot. If the
-resource was changed on the server after the snapshot was taken, the server
-answers 412, kiln reports which ids conflicted, and nothing in that bundle is
-written. The fix is to extract again, re-apply the edit, and diff again. This
-is what makes it safe for a GIS user to edit a copy that might be a day old.
+Every entry whose resource carries a `meta.versionId` is sent with
+`ifMatch` set to that version. If the resource was changed on the server
+after the snapshot was taken, the server answers 412 (some answer 409),
+nothing in that bundle is written, and kiln reads each version-checked
+resource in the bundle back to name exactly which ids conflicted and what
+version the server has now. The run stops there; bundles before it stay
+committed, and re-running the same file is safe because every entry is a
+PUT by id with a version check. The fix is to extract again, re-apply the
+edit, and diff again. This is what makes it safe for a GIS user to edit a
+copy that might be a day old.
 
-`--dry-run` runs the preflight and prints the bundle plan without posting.
+`--dry-run` runs the preflight and prints one line per bundle, naming each
+entry as `create` or `update@<version>`, without posting anything.
 
 Load does not update the snapshot. The server is the authority on what was
 stored; the next extract brings the snapshot up to date.
@@ -806,11 +841,12 @@ kiln/
     snapshot/    state.json, FHIR instants, merge by id with boundary inlining
     extract/     FHIR client with retry, paging, boundary fetch pool, boundary cache
     run.rs
-    diff/        (in progress) GeoJSON and GeoParquet readers, resource reconstruction
-    load/        (in progress) bundles, If-Match, capability preflight, retry
+    diff/        input rows from GeoJSON and GeoParquet, resource rebuild, canonical compare
+    load/        parents-first ordering, transaction bundles with ifMatch, capability preflight
   tests/
     fixtures/snapshot/
-  python/        the Python package: extract, bake, bake-points and load
+    transform.rs, extract.rs, diff.rs, load.rs
+  python/        the Python package: bake and bake-points (extract and load are superseded by the Rust binary)
   docs/
     superpowers/ design specs, plans, and spikes
 ```
