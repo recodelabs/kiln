@@ -48,6 +48,19 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     let snap = Snapshot::new(&args.snapshot);
     std::fs::create_dir_all(&snap.dir)
         .map_err(|e| KilnError::Usage(format!("--snapshot {}: {e}", snap.dir.display())))?;
+    // Fail fast, before any paging or fetching, if the snapshot directory
+    // exists but isn't writable (e.g. read-only permissions): the same
+    // mistake would otherwise surface much later as an opaque I/O error
+    // from the merge or state write.
+    let probe = snap.dir.join(".kiln-write-test");
+    std::fs::write(&probe, b"")
+        .and_then(|_| std::fs::remove_file(&probe))
+        .map_err(|e| {
+            KilnError::Usage(format!(
+                "--snapshot {}: not writable: {e}",
+                snap.dir.display()
+            ))
+        })?;
 
     // Mode: full, or incremental from --since or the stored watermark. The
     // snapshot belongs to one server: any incremental run against a

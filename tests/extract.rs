@@ -623,6 +623,45 @@ fn a_401_on_the_search_keeps_the_old_snapshot() {
 }
 
 #[test]
+fn a_non_bundle_search_response_keeps_the_old_snapshot() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(
+                vec![loc("a", "2026-01-01T00:00:00Z", None)],
+                None,
+            ))),
+    );
+    server.expect(
+        Expectation::matching(since_search("2026-01-01T00:00:00Z"))
+            .times(1)
+            .respond_with(ok(json!({"resourceType": "OperationOutcome"}).to_string())),
+    );
+
+    extract(&server, snap.path(), &[]).success();
+    let before = std::fs::read(snap.path().join("locations.ndjson")).unwrap();
+    let state_before = std::fs::read(snap.path().join("state.json")).unwrap();
+
+    let assert = extract(&server, snap.path(), &[]).failure().code(1);
+    assert!(
+        stderr(&assert).contains("expected a Bundle"),
+        "{}",
+        stderr(&assert)
+    );
+    assert_eq!(
+        std::fs::read(snap.path().join("locations.ndjson")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(snap.path().join("state.json")).unwrap(),
+        state_before
+    );
+    assert!(!snap.path().join(".incoming.ndjson").exists());
+}
+
+#[test]
 fn cache_dir_is_shared_between_snapshots() {
     let server = Server::run();
     let a = tempfile::tempdir().unwrap();
@@ -943,4 +982,35 @@ fn run_skips_transform_when_extract_fails() {
 
     assert!(!out.path().join("locations").exists());
     assert!(stderr(&assert).contains("401"), "{}", stderr(&assert));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unwritable_snapshot_dir_is_a_usage_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Root (and some CI sandboxes) can write through a read-only mode bit;
+    // when that's the case here, the premise of this test doesn't hold, so
+    // skip rather than fail on an environment we can't control.
+    let probe = snap.path().join(".kiln-write-test-probe");
+    let writable = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    if writable {
+        eprintln!("skipping: the test runner can write through 0o555 (likely running as root)");
+        let _ = std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o755));
+        return;
+    }
+
+    let assert = extract(&server, snap.path(), &[]).failure().code(2);
+    assert!(
+        stderr(&assert).contains("--snapshot"),
+        "{}",
+        stderr(&assert)
+    );
+
+    let _ = std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o755));
 }

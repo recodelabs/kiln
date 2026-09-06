@@ -9,7 +9,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::error::{KilnError, Result};
-use crate::extract::client::{FetchError, FhirClient};
+use crate::extract::client::FhirClient;
 use crate::fhir::location::BOUNDARY_EXTENSION_URLS;
 use crate::report::Report;
 
@@ -109,16 +109,19 @@ pub fn page_locations(
                 notes.len()
             )));
         }
-        let fetched = client.get(&current).map_err(|e| {
-            if matches!(e, FetchError::Transport(_)) {
-                KilnError::Environment(e.to_string())
-            } else {
-                KilnError::Environment(format!("fetching {current}: {e}"))
-            }
-        })?;
+        let fetched = client
+            .get(&current)
+            .map_err(|e| KilnError::Environment(format!("fetching {current}: {e}")))?;
         pages += 1;
         let bundle: Value = serde_json::from_slice(&fetched.body)
             .map_err(|e| KilnError::Environment(format!("{current}: response is not JSON: {e}")))?;
+        if let Some(rt) = bundle.get("resourceType").and_then(Value::as_str) {
+            if rt != "Bundle" {
+                return Err(KilnError::Environment(format!(
+                    "{current}: expected a Bundle, got resourceType {rt}"
+                )));
+            }
+        }
         for (i, entry) in bundle
             .get("entry")
             .and_then(Value::as_array)
@@ -365,6 +368,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not JSON"), "{err}");
+    }
+
+    #[test]
+    fn a_non_bundle_response_is_an_environment_error() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Location")).respond_with(
+                status_code(200)
+                    .body(serde_json::json!({"resourceType":"OperationOutcome"}).to_string()),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let err = page_locations(
+            &client(),
+            &server.url("/fhir").to_string(),
+            None,
+            &dir.path().join("i"),
+            &mut Report::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected a Bundle"), "{err}");
     }
 
     #[test]

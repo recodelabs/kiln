@@ -102,11 +102,11 @@ fn resolve_one(
     }
     let body = match client.get(url) {
         Ok(f) => f.body,
-        Err(e) => return Outcome::Failed(format!("{url}: {e}")),
+        Err(e) => return Outcome::Failed(e.to_string()),
     };
     let bytes = match extract_payload(&body) {
         Ok(b) => b,
-        Err(e) => return Outcome::Failed(format!("{url}: {e}")),
+        Err(e) => return Outcome::Failed(e),
     };
     match &opts.cache {
         Some(cache) => match cache.write(url, &bytes) {

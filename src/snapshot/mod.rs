@@ -68,6 +68,9 @@ impl State {
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(KilnError::Usage(
                 format!("{}: not a valid state file: {e}", path.display()),
             )),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(KilnError::Usage(
+                format!("{}: not readable: {e}", path.display()),
+            )),
             Err(e) => Err(KilnError::io(path, e)),
         }
     }
