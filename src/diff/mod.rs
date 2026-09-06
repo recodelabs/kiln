@@ -4,6 +4,7 @@ pub mod compare;
 pub mod geojson;
 pub mod input;
 pub mod parquet;
+pub mod rebuild;
 
 use crate::cli::DiffArgs;
 use crate::error::{KilnError, Result};

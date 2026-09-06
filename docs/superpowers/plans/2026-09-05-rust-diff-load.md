@@ -1765,6 +1765,7 @@ Add to the test module in `src/diff/rebuild.rs`:
 
 ```rust
     use base64::Engine;
+    use geo::{line_string, polygon};
 
     const SQUARE: &str = r#"{"type":"Polygon","coordinates":[[[3,6],[4,6],[4,7],[3,7],[3,6]]]}"#;
 
@@ -1788,7 +1789,7 @@ Add to the test module in `src/diff/rebuild.rs`:
     }
 
     fn square(dx: f64) -> geo::Geometry<f64> {
-        geo::Geometry::Polygon(geo::polygon![(x: 3.0 + dx, y: 6.0), (x: 4.0 + dx, y: 6.0), (x: 4.0 + dx, y: 7.0), (x: 3.0 + dx, y: 7.0), (x: 3.0 + dx, y: 6.0)])
+        geo::Geometry::Polygon(polygon![(x: 3.0 + dx, y: 6.0), (x: 4.0 + dx, y: 6.0), (x: 4.0 + dx, y: 7.0), (x: 3.0 + dx, y: 7.0), (x: 3.0 + dx, y: 6.0)])
     }
 
     fn apply_geom(base: Value, r: &InputRow, report: &mut Report) -> Value {
@@ -1877,21 +1878,23 @@ Add to the test module in `src/diff/rebuild.rs`:
     fn unsupported_and_invalid_geometries_are_reported() {
         let base = json!({"resourceType":"Location","id":"a"});
         let mut report = Report::default();
-        let line = geo::Geometry::LineString(geo::line_string![(x: 0.0, y: 0.0), (x: 1.0, y: 1.0)]);
+        let line = geo::Geometry::LineString(line_string![(x: 0.0, y: 0.0), (x: 1.0, y: 1.0)]);
         let out = apply_geom(base.clone(), &geom_row(line, &[]), &mut report);
         assert!(out.get("extension").is_none());
         assert_eq!(report.count("geometry_unparseable"), 1);
 
-        let bowtie = geo::Geometry::Polygon(geo::polygon![(x: 0.0, y: 0.0), (x: 2.0, y: 2.0), (x: 2.0, y: 0.0), (x: 0.0, y: 2.0), (x: 0.0, y: 0.0)]);
+        let bowtie = geo::Geometry::Polygon(polygon![(x: 0.0, y: 0.0), (x: 2.0, y: 2.0), (x: 2.0, y: 0.0), (x: 0.0, y: 2.0), (x: 0.0, y: 0.0)]);
         let out = apply_geom(base, &geom_row(bowtie, &[]), &mut report);
         assert_eq!(decoded_boundary(&out)["type"], "Polygon", "written as is");
         assert_eq!(report.count("geometry_invalid"), 1);
     }
 ```
 
-Add these imports at the top of the test module, next to `use super::*;`:
+Add these imports at the top of the test module, next to `use super::*;` (the geo macros must be imported by name, since `polygon!` expands to other geo macros):
 
 ```rust
+    use geo::{line_string, polygon};
+
     use crate::fhir::location::{BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS};
 ```
 
