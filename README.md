@@ -654,6 +654,7 @@ SELECT id, fhir_json->>'$.extension[0].url' FROM 'out/locations/**/*.parquet';
 ```
 
 **QGIS** opens the directory or a single partition file as a vector layer.
+The edit-and-push-back loop, step by step, is in [docs/qgis.md](docs/qgis.md).
 
 **GeoPandas** reads it with `read_parquet`.
 
