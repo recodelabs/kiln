@@ -538,7 +538,8 @@ Python users.
 The input is detected by extension: `.geojson` or `.json` for a
 FeatureCollection, read one feature at a time so a whole-country export
 never sits in memory; `.geojsonl` or `.geojsons` for one Feature per line;
-`.parquet` for GeoParquet, read one record batch at a time. The row's id is
+`.parquet` for GeoParquet, read one record batch at a time, whatever
+compression the exporting tool chose (Snappy, zstd, LZ4 or none). The row's id is
 the `id` column, or the Feature id when the column is absent. A row with an
 id the snapshot does not have becomes a new Location; a row with no id at
 all is given a UUID and reported as `new_location_generated_id`.
