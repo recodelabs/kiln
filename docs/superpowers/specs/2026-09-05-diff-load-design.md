@@ -1,7 +1,7 @@
 # kiln diff and load — design (plan 3 of the Rust rewrite)
 
 **Date:** 2026-09-05
-**Status:** Approved 2026-09-05; implementation plan `docs/superpowers/plans/2026-09-05-rust-diff-load.md`, branch `rust-diff-load`.
+**Status:** Implemented on branch `rust-diff-load` (plan `docs/superpowers/plans/2026-09-05-rust-diff-load.md`). Amendments made during execution: a GeoJSON position with fewer than two numbers is rejected by the parser for the whole file (a usage error naming the file) rather than reported per row; `position_geometry_disagree` fires only when the position columns themselves changed from the snapshot, so the stale-but-unchanged columns every GIS export carries never report; `duplicate_id` in the input keeps the first row.
 **Builds on:** README.md ("Round trip: diff and load", "Columns", "What is writable"), plan 1 (`transform`, `inspect`, PR #8), plan 2 (`extract`, `run`, PR #9)
 
 ## Problem

@@ -61,7 +61,7 @@ tests/
 - Modify: `src/main.rs`
 - Create: `src/diff/mod.rs`, `src/load/mod.rs`
 
-- [ ] **Step 1: Add dependencies**
+- [x] **Step 1: Add dependencies**
 
 In `Cargo.toml` under `[dependencies]`, after the `url` line, add:
 
@@ -70,7 +70,7 @@ uuid = { version = "1", features = ["v4"] }
 geo-traits = "0.3"
 ```
 
-- [ ] **Step 2: Add the CLI types**
+- [x] **Step 2: Add the CLI types**
 
 In `src/cli.rs`, after `DEFAULT_TIMEOUT_SECS`, add:
 
@@ -132,7 +132,7 @@ pub struct LoadArgs {
 }
 ```
 
-- [ ] **Step 3: Stub the modules and wire main**
+- [x] **Step 3: Stub the modules and wire main**
 
 Create `src/diff/mod.rs`:
 
@@ -167,12 +167,12 @@ In `src/main.rs`, add `mod diff;` after `mod cli;` and `mod load;` after `mod in
         cli::Command::Load(args) => load::run_load(&args),
 ```
 
-- [ ] **Step 4: Build and check the help**
+- [x] **Step 4: Build and check the help**
 
 Run: `cargo build 2>&1 | tail -3 && ./target/debug/kiln diff --help | head -3 && ./target/debug/kiln load --help | grep -c -- '--'`
 Expected: a clean build, the diff help header, and `7` (server, token, in, dry-run, batch-size, retries, timeout, plus help/version lines count too; anything ≥ 7 is fine).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock src/cli.rs src/main.rs src/diff/mod.rs src/load/mod.rs
@@ -187,7 +187,7 @@ git commit -m "diff, load: CLI surface and stubs"
 - Create: `src/diff/compare.rs`
 - Modify: `src/diff/mod.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/diff/compare.rs` with only the test module for now:
 
@@ -228,13 +228,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Add `pub mod compare;` at the top of `src/diff/mod.rs` (after the module doc comment).
 Run: `cargo test diff::compare 2>&1 | grep -E 'error\[|cannot find' | head -3`
 Expected: errors that `round_coord`, `wkb_key`, `canonical` are not found.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Insert above the test module in `src/diff/compare.rs`:
 
@@ -281,12 +281,12 @@ pub fn canonical(v: &Value) -> Value {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test diff::compare 2>&1 | grep 'test result'`
 Expected: `test result: ok. 3 passed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/diff/compare.rs src/diff/mod.rs
@@ -301,7 +301,7 @@ git commit -m "diff: seven-decimal rounding, WKB key, canonical JSON"
 - Create: `src/diff/input.rs`
 - Modify: `src/diff/mod.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/diff/input.rs` with the test module:
 
@@ -367,13 +367,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Add `pub mod input;` to `src/diff/mod.rs`.
 Run: `cargo test diff::input 2>&1 | grep -c 'cannot find'`
 Expected: a non-zero count.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Insert above the test module:
 
@@ -516,12 +516,12 @@ pub fn column_from_json(name: &str, v: &Value) -> Result<ColumnValue, String> {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test diff::input 2>&1 | grep 'test result'`
 Expected: `test result: ok. 5 passed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/diff/input.rs src/diff/mod.rs
@@ -537,7 +537,7 @@ git commit -m "diff: InputRow and column coercion"
 - Create: `src/diff/geojson.rs`
 - Modify: `src/diff/mod.rs`
 
-- [ ] **Step 1: Expose the GeoJSON → geo conversion**
+- [x] **Step 1: Expose the GeoJSON → geo conversion**
 
 In `src/geometry/geojson.rs`, replace the whole `to_geo` function with a public conversion plus a thin reporting wrapper:
 
@@ -573,7 +573,7 @@ In `src/geometry/mod.rs` change the re-export line to `pub use geojson::{convert
 Run: `cargo test geometry 2>&1 | grep 'test result'`
 Expected: all geometry tests still pass.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 Create `src/diff/geojson.rs` with the test module:
 
@@ -697,13 +697,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run the tests to see them fail**
+- [x] **Step 3: Run the tests to see them fail**
 
 Add `pub mod geojson;` to `src/diff/mod.rs`.
 Run: `cargo test diff::geojson 2>&1 | grep -c 'cannot find'`
 Expected: non-zero.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 Insert above the test module:
 
@@ -887,12 +887,12 @@ where
 }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test diff::geojson 2>&1 | grep 'test result'`
 Expected: `test result: ok. 7 passed`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/geometry/geojson.rs src/geometry/mod.rs src/diff/geojson.rs src/diff/mod.rs
@@ -907,7 +907,7 @@ git commit -m "diff: streaming GeoJSON readers and feature-to-row"
 - Create: `src/diff/parquet.rs`
 - Modify: `src/diff/mod.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `src/diff/parquet.rs` with the test module:
 
@@ -1016,13 +1016,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to see it fail**
+- [x] **Step 2: Run the test to see it fail**
 
 Add `pub mod parquet;` to `src/diff/mod.rs`.
 Run: `cargo test diff::parquet 2>&1 | grep -c 'cannot find'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Insert above the test module:
 
@@ -1199,12 +1199,12 @@ pub fn cell_to_json(col: &ArrayRef, r: usize) -> Option<Value> {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test diff::parquet 2>&1 | grep 'test result'`
 Expected: `test result: ok. 2 passed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/diff/parquet.rs src/diff/mod.rs
@@ -1219,7 +1219,7 @@ git commit -m "diff: GeoParquet reader"
 - Create: `src/diff/rebuild.rs`
 - Modify: `src/diff/mod.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/diff/rebuild.rs` with the test module:
 
@@ -1376,13 +1376,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Add `pub mod rebuild;` to `src/diff/mod.rs`.
 Run: `cargo test diff::rebuild 2>&1 | grep -c 'cannot find'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement the column application**
+- [x] **Step 3: Implement the column application**
 
 Insert above the test module. The geometry hook at the end of `rebuild` is a stub until Task 6.
 
@@ -1740,12 +1740,12 @@ fn apply_geometry(
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test diff::rebuild 2>&1 | grep 'test result'`
 Expected: `test result: ok. 9 passed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/diff/rebuild.rs src/diff/mod.rs
@@ -1759,7 +1759,7 @@ git commit -m "diff: apply writable columns to the snapshot resource"
 **Files:**
 - Modify: `src/diff/rebuild.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the test module in `src/diff/rebuild.rs`:
 
@@ -1898,12 +1898,12 @@ Add these imports at the top of the test module, next to `use super::*;` (the ge
     use crate::fhir::location::{BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS};
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test diff::rebuild 2>&1 | grep -E 'test result|panicked' | head -5`
 Expected: several of the new tests fail (the geometry stub does nothing).
 
-- [ ] **Step 3: Implement the geometry rule**
+- [x] **Step 3: Implement the geometry rule**
 
 Replace the `apply_geometry` stub with:
 
@@ -2031,12 +2031,12 @@ use crate::geometry::{kind_name, parse_boundary, validity};
 
 (merge the `crate::diff::compare` and `crate::fhir::location` lines with the existing ones).
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test diff::rebuild 2>&1 | grep 'test result'`
 Expected: `test result: ok. 16 passed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/diff/rebuild.rs
@@ -2051,7 +2051,7 @@ git commit -m "diff: geometry edits go to the boundary or the position"
 - Modify: `src/diff/mod.rs`
 - Create: `tests/diff.rs`
 
-- [ ] **Step 1: Write the failing binary tests**
+- [x] **Step 1: Write the failing binary tests**
 
 Create `tests/diff.rs`:
 
@@ -2294,12 +2294,12 @@ fn a_failed_diff_leaves_no_partial_output() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test --test diff 2>&1 | grep 'test result'`
 Expected: `test result: FAILED` with every test failing on the "not implemented" stub.
 
-- [ ] **Step 3: Implement run_diff**
+- [x] **Step 3: Implement run_diff**
 
 Replace the whole of `src/diff/mod.rs` with:
 
@@ -2546,7 +2546,7 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
 
 If the compiler complains that `diff.out` is moved inside the closure while `diff` is still borrowed, restructure: run `read_input` first into `let read = ...;`, then `match read { Ok(()) => finish(diff.out, &tmp, &args.out), Err(e) => ... }` with `fn finish(out: BufWriter<File>, tmp: &Path, dest: &Path) -> Result<()>` holding the flush/sync/rename lines. Keep the cleanup of `tmp` on any error.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --test diff 2>&1 | grep 'test result'`
 Expected: `test result: ok. 6 passed`
@@ -2554,7 +2554,7 @@ Expected: `test result: ok. 6 passed`
 Run: `cargo test 2>&1 | grep -E 'test result|warning' | sort | uniq -c`
 Expected: every suite ok, no warnings.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/diff/mod.rs tests/diff.rs
@@ -2568,7 +2568,7 @@ git commit -m "diff: the command, with atomic output and binary tests"
 **Files:**
 - Modify: `tests/diff.rs`
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 Append to `tests/diff.rs`:
 
@@ -2741,12 +2741,12 @@ fn geoparquet_written_by_transform_round_trips_unchanged() {
 }
 ```
 
-- [ ] **Step 2: Run the tests**
+- [x] **Step 2: Run the tests**
 
 Run: `cargo test --test diff 2>&1 | grep -E 'test result|panicked|FAILED'`
 Expected: `test result: ok. 14 passed`. If `geoparquet_written_by_transform_round_trips_unchanged` fails on a column, print the failing row's rebuilt JSON against the snapshot line and fix the coercion or the rebuild rule, not the test: the transform's own output must diff clean.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/diff.rs
@@ -2761,7 +2761,7 @@ git commit -m "diff: geometry, create, GeoParquet and line-input tests"
 - Create: `src/load/order.rs`, `src/load/bundle.rs`, `src/load/capability.rs`
 - Modify: `src/load/mod.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/load/order.rs`:
 
@@ -2902,12 +2902,12 @@ pub mod capability;
 pub mod order;
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test load:: 2>&1 | grep -c 'cannot find'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement ordering**
+- [x] **Step 3: Implement ordering**
 
 Insert above the test module in `src/load/order.rs`:
 
@@ -2975,7 +2975,7 @@ pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
 }
 ```
 
-- [ ] **Step 4: Implement bundles**
+- [x] **Step 4: Implement bundles**
 
 Insert above the test module in `src/load/bundle.rs`:
 
@@ -3057,7 +3057,7 @@ pub fn plan(resources: Vec<Value>, batch_size: usize) -> Vec<Bundle> {
 }
 ```
 
-- [ ] **Step 5: Implement the capability check**
+- [x] **Step 5: Implement the capability check**
 
 Insert above the test module in `src/load/capability.rs`:
 
@@ -3106,12 +3106,12 @@ pub fn check_update_create(capability: &Value, needed: &[String]) -> Result<()> 
 }
 ```
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test load:: 2>&1 | grep 'test result'`
 Expected: `test result: ok. 8 passed`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/load/order.rs src/load/bundle.rs src/load/capability.rs src/load/mod.rs
@@ -3125,7 +3125,7 @@ git commit -m "load: parents-first ordering, bundles with ifMatch, updateCreate 
 **Files:**
 - Modify: `src/extract/client.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the test module in `src/extract/client.rs`:
 
@@ -3167,12 +3167,12 @@ Add to the test module in `src/extract/client.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test extract::client 2>&1 | grep -c 'no method named'`
 Expected: non-zero.
 
-- [ ] **Step 3: Refactor the retry loop and add post_json**
+- [x] **Step 3: Refactor the retry loop and add post_json**
 
 In `src/extract/client.rs`, replace the `get` method with:
 
@@ -3246,7 +3246,7 @@ In `src/extract/client.rs`, replace the `get` method with:
 
 Add `CONTENT_TYPE` to the `reqwest::header` import line. Update the module doc comment's first sentence to "The one HTTP client. Bearer auth, FHIR accept header, and the retry policy shared by paging, boundary fetches and load's bundle posts".
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test extract:: 2>&1 | grep 'test result'`
 Expected: all extract tests pass, including the two new ones.
@@ -3254,7 +3254,7 @@ Expected: all extract tests pass, including the two new ones.
 Run: `cargo test --test extract 2>&1 | grep 'test result'`
 Expected: unchanged, all pass (the 2xx change does not alter any GET behaviour the fake server exercises).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/extract/client.rs
@@ -3269,7 +3269,7 @@ git commit -m "client: post_json with the shared retry loop; any 2xx succeeds"
 - Modify: `src/load/mod.rs`
 - Create: `tests/load.rs`
 
-- [ ] **Step 1: Write the failing binary tests**
+- [x] **Step 1: Write the failing binary tests**
 
 Create `tests/load.rs`:
 
@@ -3532,12 +3532,12 @@ fn input_problems_are_usage_errors_before_any_request() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test --test load 2>&1 | grep 'test result'`
 Expected: `test result: FAILED` (the stub refuses everything with exit 2).
 
-- [ ] **Step 3: Implement run_load**
+- [x] **Step 3: Implement run_load**
 
 Replace the whole of `src/load/mod.rs` with:
 
@@ -3748,7 +3748,7 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --test load 2>&1 | grep -E 'test result|panicked'`
 Expected: `test result: ok. 6 passed`
@@ -3759,7 +3759,7 @@ Expected: every suite ok, no warnings.
 Run: `cargo clippy --all-targets 2>&1 | grep -E '^(warning|error)' | sort | uniq -c`
 Expected: nothing new compared with `git stash; cargo clippy --all-targets; git stash pop` on the branch base (the crate is not clippy-clean historically; only fix what this plan introduced).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/load/mod.rs tests/load.rs
@@ -3774,7 +3774,7 @@ git commit -m "load: the command, with preflight, If-Match bundles and conflict 
 - Modify: `README.md`
 - Modify: `docs/superpowers/specs/2026-09-05-diff-load-design.md`
 
-- [ ] **Step 1: Update the README**
+- [x] **Step 1: Update the README**
 
 In `README.md`:
 
@@ -3879,11 +3879,11 @@ and add `diff.rs, load.rs` after `fixtures/snapshot/` under `tests/`. Change the
 
 6. In "What kiln does not do", the bullet "Validate against the profile" already describes diff correctly; leave it.
 
-- [ ] **Step 2: Update the spec status**
+- [x] **Step 2: Update the spec status**
 
 In `docs/superpowers/specs/2026-09-05-diff-load-design.md`, change the `**Status:**` line to: `Implemented on branch \`rust-diff-load\` (plan \`docs/superpowers/plans/2026-09-05-rust-diff-load.md\`).` If any decision changed during execution, add it to that line the way the plan 2 spec records its amendments.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-09-05-diff-load-design.md
