@@ -1176,6 +1176,29 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
 }
 
 #[test]
+fn a_full_last_page_with_no_next_link_is_cross_checked_against_the_count() {
+    // HAPI FHIR 8.12 (stock prefetch thresholds) stopped issuing next links
+    // after 3,000 results: the last page was exactly full, and a full extract
+    // would have passed a 3,000-row snapshot as complete.
+    let server = Server::run();
+    expect_no_organizations(&server);
+    let snap = tempfile::tempdir().unwrap();
+    let page: Vec<Value> = (0..1000).map(|i| loc(&format!("l{i}"), "2026-01-01T00:00:00Z", None)).collect();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(page, None))),
+    );
+    expect_counts(&server, 2500, 0);
+    let out = stdout(&extract(&server, snap.path(), &[]).success());
+    assert!(out.contains("count_mismatch: 1"), "{out}");
+    assert_eq!(lines(snap.path()).len(), 1000, "what was paged is still written");
+    let report: Value = serde_json::from_str(&std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap()).unwrap();
+    let detail = report["issues"][0]["detail"].as_str().unwrap();
+    assert!(detail.contains("reports 2500 Location resources") && detail.contains("paged 1000"), "{detail}");
+}
+
+#[test]
 fn a_deletion_on_the_server_is_reported_by_the_count_check() {
     let server = Server::run();
     expect_no_organizations(&server);

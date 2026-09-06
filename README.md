@@ -309,6 +309,14 @@ numbers and pointing at `--full`; it cannot say which resource went, only
 that one did. A server that returns no total is noted on stderr and the
 check is skipped.
 
+A full extract makes the same cross-check in one case: when its last page
+held a full `_count` of entries and the server gave no next link. A result
+set can end on an exactly full page, but a server that stops paging early
+looks identical (HAPI FHIR 8.12 with its stock `search_prefetch_thresholds`
+stopped after 3,000 of 51,843 Locations), and without the check a short
+snapshot would pass as complete. The `count_mismatch` detail says which
+case it is and that the snapshot is incomplete.
+
 ---
 
 ## The output dataset
