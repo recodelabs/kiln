@@ -365,7 +365,7 @@ whether an edit to the column will flow back to FHIR.
 | `identifier` | `Location.identifier`, list of struct `{system, value}` |
 | `position_longitude`, `position_latitude` | `Location.position` |
 | `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
-| `pcode`, `gers_id` | promoted from `identifier` by system, for convenience |
+| `pcode`, `gers_id` | promoted from `identifier` by system, for convenience; `pcode` comes from the ICR pcode system, or failing that the `national-admin-code` system |
 | `settlement_type`, `delivery_strategy`, `facility_level`, `ownership` | the ICR profile extensions |
 
 A Location with both a boundary and a position is one row: the polygon is the
