@@ -3,6 +3,7 @@
 pub mod compare;
 pub mod geojson;
 pub mod input;
+pub mod parquet;
 
 use crate::cli::DiffArgs;
 use crate::error::{KilnError, Result};
