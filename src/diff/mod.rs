@@ -23,9 +23,10 @@ use crate::diff::input::InputRow;
 use crate::diff::parquet::read_geoparquet;
 use crate::diff::rebuild::rebuild;
 use crate::error::{KilnError, Result};
-use crate::fhir::ndjson::{LineAccess, NdjsonReader};
+use crate::fhir::ndjson::LineAccess;
 use crate::fhir::Location;
 use crate::report::Report;
+use crate::snapshot::index::index_by_id;
 use crate::transform::{write_report, SNAPSHOT_FILE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,36 +60,6 @@ pub struct DiffStats {
     pub changed: usize,
     pub unchanged: usize,
     pub created: usize,
-}
-
-/// `id -> (offset, len)` for every resource in the snapshot. Nothing else
-/// is retained; a resource is re-read only when an input row names it.
-pub fn index_snapshot(path: &Path, report: &mut Report) -> Result<HashMap<String, (u64, usize)>> {
-    let mut index = HashMap::new();
-    for line in NdjsonReader::open(path)? {
-        let line = line?;
-        let id = serde_json::from_str::<Value>(&line.text)
-            .ok()
-            .and_then(|v| v.get("id")?.as_str().map(str::to_string));
-        match id {
-            Some(id) => match index.entry(id) {
-                std::collections::hash_map::Entry::Occupied(e) => report.add(
-                    "duplicate_id",
-                    e.key(),
-                    &format!("snapshot line {} repeats an earlier id; first kept", line.number),
-                ),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert((line.offset, line.len));
-                }
-            },
-            None => report.add(
-                "snapshot_line_unparsed",
-                "<unknown>",
-                &format!("snapshot line {} is not a resource with an id", line.number),
-            ),
-        }
-    }
-    Ok(index)
 }
 
 struct Diff<'a> {
@@ -218,7 +189,7 @@ pub fn run_diff(args: &DiffArgs) -> Result<()> {
     }
 
     let mut report = Report::default();
-    let index = index_snapshot(&ndjson, &mut report)?;
+    let index = index_by_id(&ndjson, &mut report, "snapshot_line_unparsed")?;
     eprintln!("indexed {} snapshot resources", index.len());
 
     let tmp = tmp_path(&args.out);

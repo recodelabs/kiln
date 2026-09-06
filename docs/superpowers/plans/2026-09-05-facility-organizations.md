@@ -314,7 +314,7 @@ mod tests {
         let mut report = Report::default();
         let index = index_by_id(f.path(), &mut report, "organization_line_unparsed").unwrap();
         assert_eq!(index.len(), 2);
-        assert_eq!(index["a"], (0, 15));
+        assert_eq!(index["a"], (0, 16));
         assert_eq!(report.count("duplicate_id"), 1);
         assert_eq!(report.count("organization_line_unparsed"), 1);
     }

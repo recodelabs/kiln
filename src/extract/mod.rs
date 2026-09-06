@@ -196,6 +196,8 @@ fn run_phases(args: &ExtractArgs, snap: &Snapshot, since: Option<&str>) -> Resul
         server: args.server.trim_end_matches('/').to_string(),
         watermark: stats.watermark.clone(),
         count: stats.total,
+        organization_watermark: None,
+        organization_count: None,
         kiln_version: env!("CARGO_PKG_VERSION").to_string(),
         completed_at: format_utc(std::time::SystemTime::now()),
     };
