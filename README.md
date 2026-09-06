@@ -11,13 +11,13 @@ projection of it.
 It ships as a single static binary with no runtime dependencies: no Python, no
 GDAL, no database. It is designed to run on a laptop in a district office.
 
-> **Status.** `transform` and `inspect` are implemented in Rust and are what
-> this README describes. `extract`, `diff` and `load` are in progress. Until
-> they land, the Python package under `python/` still provides `extract`,
-> `bake`, `bake-points` and `load`; it is documented in
-> [python/README.md](python/README.md). Its `extract` writes a single NDJSON
-> file, which is exactly what `kiln transform --snapshot DIR` expects to find
-> as `DIR/locations.ndjson`.
+> **Status.** `extract`, `transform`, `run` and `inspect` are implemented in
+> Rust and are what this README describes. `diff` and `load` are in progress.
+> Until they land, the Python package under `python/` still provides `bake`,
+> `bake-points` and `load`; it is documented in
+> [python/README.md](python/README.md). A snapshot written by the Python
+> `extract` is accepted by the Rust binary: with no `state.json` it is treated
+> as a full extract on the next run.
 
 ---
 
@@ -177,17 +177,27 @@ Steps 5 to 7 happen when someone has something to fix.
 All commands are subcommands of one binary.
 
 ```
-kiln extract   --server URL [--token T] --snapshot DIR [--full] [--concurrency N] [--retries N]
+kiln extract   --server URL [--token T] --snapshot DIR
+               [--full] [--since INSTANT] [--timeout SECS]
+               [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
+               [--no-cache] [--refresh] [--cache-dir DIR]
 kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
-kiln run       --server URL [--token T] --snapshot DIR --out DIR [...]
+kiln run       <extract flags> <transform flags>
 kiln inspect   --out DIR
 kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson
 kiln load      --server URL [--token T] --in CHANGES.ndjson [--dry-run] [--batch-size N]
 ```
 
-`--token` falls back to `$KILN_TOKEN`. Any FHIR R4 server that supports
-standard search with `_lastUpdated` and transaction bundles works; kiln does
-not depend on any vendor's extensions.
+`--token` falls back to `$KILN_TOKEN` and is sent as a bearer token; getting
+the token is outside kiln. Any FHIR R4 server that supports standard search
+with `_lastUpdated`, `Bundle.link` paging and transaction bundles works; kiln
+does not depend on any vendor's extensions.
+
+`--timeout` is the total deadline for one HTTP request, 300 seconds by
+default; a large boundary over a slow link can legitimately take minutes.
+Connection errors, 429 and 5xx responses are retried up to `--retries` times
+with exponential backoff and jitter, honouring a numeric `Retry-After`. Any
+other 4xx is final.
 
 `extract` and `load` touch the network. `transform`, `inspect` and `diff`
 never do. That split is deliberate: a slow server or an expired token has
@@ -203,9 +213,11 @@ between runs.
 
 ```
 snapshot/
-  locations.ndjson     one Location resource per line, boundaries inlined
-  state.json           server URL, watermark, resource count, kiln version
-  boundaries/          content addressed cache of fetched boundary attachments
+  locations.ndjson       one Location resource per line, boundaries inlined
+  state.json             server URL, watermark, resource count, kiln version
+  boundaries/            content addressed cache of fetched boundary attachments
+  _extract_report.json   issues found by the last successful extract
+  .incoming.ndjson       present only during, or after an interrupted, run
 ```
 
 **`locations.ndjson`** holds every Location as the server returned it, with
@@ -213,18 +225,56 @@ one change: a boundary attachment that referred to a URL has been fetched and
 inlined as base64 data, so the file is self contained. It is plain NDJSON. You
 can `grep` it, `jq` it, diff two of them, or hand one to someone else.
 
-**`state.json`** records the watermark: the latest `meta.lastUpdated` seen in
-the snapshot. The next extract asks the server for
-`Location?_lastUpdated=gt<watermark>` and merges the result by id: new ids are
-appended, existing ids are replaced. The merge rewrites the file, which is a
-sequential pass and takes seconds even for a large country.
+**`state.json`** records the server URL and the watermark: the greatest
+`meta.lastUpdated` across the whole snapshot. The next extract asks the server
+for `Location?_lastUpdated=ge<watermark>` and merges the result by id: new
+ids are appended, existing ids are replaced. The comparison is greater or
+equal because servers differ in timestamp precision, so the resource that set
+the watermark is refetched every run and replaces itself; the `updated` count
+that extract prints therefore includes it. The merge rewrites the file, which
+is a sequential pass and takes seconds even for a large country. Running an
+incremental extract against a different server than the snapshot came from
+is refused; `--full` repoints it. `--since INSTANT` overrides the stored
+watermark for one run.
+
+Extract runs in three phases. It pages the search into `.incoming.ndjson`,
+noting ids, timestamps and boundary URLs; it fetches the distinct boundary
+URLs on `--concurrency` worker threads into the cache; and it merges the old
+file and the incoming file into a new `locations.ndjson`, inlining boundary
+bytes from the cache, then swaps it into place and writes `state.json`. A
+failure in any phase leaves the previous snapshot untouched.
 
 **`boundaries/`** is the boundary cache carried over from the Python kiln.
 Admin boundaries change rarely, and a registry can have tens of thousands of
 them, so every successfully fetched attachment is stored under a hash of its
 URL and served from disk on later runs. A run that is killed halfway through a
 long fetch resumes where it left off. Only successes are cached, so a
-temporary outage does not become a permanent one.
+temporary outage does not become a permanent one. The cache is keyed by a
+hash of the URL only, so `--cache-dir` can point several snapshots at one
+shared directory; `--refresh` refetches everything but still writes the
+cache, and `--no-cache` skips it entirely and holds fetched boundaries in
+memory for the merge.
+
+If `--max-consecutive-failures` boundary fetches in a row fail while nothing
+in the run has succeeded, extract aborts rather than grinding through
+thousands of attempts against a dead server or a bad token; `0` disables the
+check. With the default timeout and retries a dead server can take over an
+hour to trip it, because each attempt cycle runs the full timeout; lower
+`--timeout` or the threshold for a fast failure. A scattering of dead URLs
+in an otherwise healthy registry never trips it, because one success resets
+the count.
+
+A search response that is not a Bundle, for example an OperationOutcome or a
+gateway's index page returned with status 200, aborts the run rather than
+being read as an empty registry.
+
+`_extract_report.json` has the same shape as transform's report and adds
+these kinds: `page_resource_skipped` (a bundle entry with no resource object
+or no id), `boundary_fetch_failed` (the attachment is left as a URL),
+`boundary_stale_from_cache` (under `--refresh` the refetch failed and the
+cached copy was used), `cache_error` (an unreadable or unwritable cache
+entry, treated as a miss), and `snapshot_line_unparsed` (a line in the old
+snapshot with no id, copied unchanged).
 
 ### Incremental extract and its limits
 
@@ -753,8 +803,9 @@ kiln/
     write/       Parquet writers, geo metadata, atomic swap
     report.rs
     transform.rs, inspect.rs
-    snapshot/    (in progress) state.json, merge by id, watermark
-    extract/     (in progress) FHIR client, paging, boundary fetch, boundary cache
+    snapshot/    state.json, FHIR instants, merge by id with boundary inlining
+    extract/     FHIR client with retry, paging, boundary fetch pool, boundary cache
+    run.rs
     diff/        (in progress) GeoJSON and GeoParquet readers, resource reconstruction
     load/        (in progress) bundles, If-Match, capability preflight, retry
   tests/

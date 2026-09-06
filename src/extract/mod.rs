@@ -1,0 +1,220 @@
+//! `kiln extract`: page, fetch, merge. See the spec for the phase contracts.
+
+pub mod boundary;
+pub mod cache;
+pub mod client;
+pub mod page;
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::cli::ExtractArgs;
+use crate::error::{KilnError, Result};
+use crate::extract::boundary::{fetch_boundaries, FetchOptions};
+use crate::extract::cache::Cache;
+use crate::extract::client::FhirClient;
+use crate::extract::page::page_locations;
+use crate::report::Report;
+use crate::snapshot::instant::{format_utc, parse_instant};
+use crate::snapshot::merge::merge;
+use crate::snapshot::{same_server, Snapshot, State};
+use crate::transform::write_report;
+
+/// Fetch Locations into the snapshot, incrementally unless `--full`.
+///
+/// Nothing before the merge touches `locations.ndjson` or `state.json`, so a
+/// failure in the page or fetch phase leaves the previous snapshot intact.
+pub fn run_extract(args: &ExtractArgs) -> Result<()> {
+    if args.no_cache && (args.refresh || args.cache_dir.is_some()) {
+        return Err(KilnError::Usage(
+            "--no-cache cannot be combined with --refresh or --cache-dir".into(),
+        ));
+    }
+    if args.concurrency == 0 {
+        return Err(KilnError::Usage("--concurrency must be at least 1".into()));
+    }
+    if args.full && args.since.is_some() {
+        return Err(KilnError::Usage(
+            "--since has no effect with --full; drop one".into(),
+        ));
+    }
+    if let Some(s) = &args.since {
+        if parse_instant(s).is_none() {
+            return Err(KilnError::Usage(format!(
+                "--since {s}: not a FHIR instant (e.g. 2026-01-02T03:04:05Z)"
+            )));
+        }
+    }
+    let snap = Snapshot::new(&args.snapshot);
+    std::fs::create_dir_all(&snap.dir)
+        .map_err(|e| KilnError::Usage(format!("--snapshot {}: {e}", snap.dir.display())))?;
+    // Fail fast, before any paging or fetching, if the snapshot directory
+    // exists but isn't writable (e.g. read-only permissions): the same
+    // mistake would otherwise surface much later as an opaque I/O error
+    // from the merge or state write.
+    let probe = snap.dir.join(".kiln-write-test");
+    std::fs::write(&probe, b"")
+        .and_then(|_| std::fs::remove_file(&probe))
+        .map_err(|e| {
+            KilnError::Usage(format!(
+                "--snapshot {}: not writable: {e}",
+                snap.dir.display()
+            ))
+        })?;
+
+    // Mode: full, or incremental from --since or the stored watermark. The
+    // snapshot belongs to one server: any incremental run against a
+    // different one -- including one pinned with --since -- would silently
+    // mix two registries, so it is a usage error. --full repoints.
+    let state = State::read(&snap.state_path())?;
+    if !args.full {
+        if let Some(st) = &state {
+            if !same_server(&st.server, &args.server) {
+                return Err(KilnError::Usage(format!(
+                    "snapshot was extracted from {} but --server is {}; pass --full to repoint it",
+                    st.server, args.server
+                )));
+            }
+        }
+    }
+    let since: Option<String> = if args.full {
+        None
+    } else if let Some(s) = &args.since {
+        Some(s.clone())
+    } else {
+        state.as_ref().and_then(|st| st.watermark.clone())
+    };
+    eprintln!(
+        "{}",
+        match &since {
+            Some(s) => format!("incremental extract since {s}"),
+            None => "full extract".to_string(),
+        }
+    );
+
+    let result = run_phases(args, &snap, since.as_deref());
+    if result.is_err() {
+        // The incoming file describes a run that never finished. The next
+        // run truncates it before paging, so keeping it buys nothing and
+        // it would only mislead anyone inspecting the snapshot directory.
+        let _ = std::fs::remove_file(snap.incoming());
+    }
+    result
+}
+
+/// The three phases. Split out so `run_extract` can clean up the incoming
+/// file on any failure between creating it and the merge that consumes it.
+fn run_phases(args: &ExtractArgs, snap: &Snapshot, since: Option<&str>) -> Result<()> {
+    let full = since.is_none();
+    let client = FhirClient::new(
+        args.token.clone(),
+        args.retries,
+        Duration::from_secs(args.timeout),
+    )?;
+    let mut report = Report::default();
+
+    let paged = page_locations(&client, &args.server, since, &snap.incoming(), &mut report)?;
+    // Reported here rather than inside the pager so every phase summary is
+    // printed by the orchestrator; the pager returns the moment it is done,
+    // so this still lands before the (much longer) fetch phase starts.
+    eprintln!(
+        "paged {} resources over {} page(s)",
+        paged.notes.len(),
+        paged.pages
+    );
+
+    let mut urls: Vec<String> = paged
+        .notes
+        .iter()
+        .filter_map(|n| n.boundary_url.clone())
+        .collect();
+    urls.sort();
+    urls.dedup();
+    let cache = if args.no_cache {
+        None
+    } else {
+        Some(Cache::new(
+            &args.cache_dir.clone().unwrap_or_else(|| snap.boundaries()),
+        ))
+    };
+    let opts = FetchOptions {
+        concurrency: args.concurrency,
+        cache: cache.clone(),
+        refresh: args.refresh,
+        max_consecutive_failures: args.max_consecutive_failures,
+    };
+    let summary = fetch_boundaries(&client, &urls, &opts, &mut report)?;
+
+    // The merge reads boundary bytes back by URL: from memory with
+    // --no-cache (or after a cache write failed), from the cache otherwise.
+    let in_memory: HashMap<String, Vec<u8>> = summary.in_memory;
+    let lookup = |url: &str| -> Option<Vec<u8>> {
+        if let Some(b) = in_memory.get(url) {
+            return Some(b.clone());
+        }
+        cache.as_ref().and_then(|c| c.read(url).ok().flatten())
+    };
+    let stats = merge(
+        snap,
+        &paged.notes,
+        full,
+        &lookup,
+        &summary.failures,
+        &mut report,
+    )?;
+
+    // --refresh skips cache reads, so a URL can both fail its refetch and
+    // still have a last-known-good copy in the cache, which the merge above
+    // inlined. Keeping that copy is the right call, but it must not pass
+    // for a fresh one. Without --refresh a failed URL is never in the cache
+    // (the worker reads it before fetching), so this finds nothing.
+    if args.refresh {
+        let mut have_cached: HashMap<&str, bool> = HashMap::new();
+        for note in &paged.notes {
+            let Some(url) = note.boundary_url.as_deref() else {
+                continue;
+            };
+            let Some(reason) = summary.failures.get(url) else {
+                continue;
+            };
+            let cached = *have_cached.entry(url).or_insert_with(|| {
+                cache
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.read(url), Ok(Some(_))))
+            });
+            if cached {
+                report.add(
+                    "boundary_stale_from_cache",
+                    &note.id,
+                    &format!("{url}: refetch failed ({reason}); cached copy used"),
+                );
+            }
+        }
+    }
+
+    let new_state = State {
+        server: args.server.trim_end_matches('/').to_string(),
+        watermark: stats.watermark.clone(),
+        count: stats.total,
+        kiln_version: env!("CARGO_PKG_VERSION").to_string(),
+        completed_at: format_utc(std::time::SystemTime::now()),
+    };
+    new_state.write(&snap.state_path())?;
+    // Unlike transform, extract does not clear a stale report first: the
+    // merge is atomic, so until it succeeds the snapshot on disk is still
+    // the previous run's, and so is the report that describes it.
+    write_report(&snap.report_path(), &report)?;
+
+    // "updated" counts rows the server returned that the snapshot already
+    // held. The watermark comparison is `ge`, so the row that set the
+    // watermark is refetched by every incremental run and counted here.
+    println!(
+        "snapshot: {} resources, {} new, {} updated, watermark {}",
+        stats.total,
+        stats.added,
+        stats.updated,
+        stats.watermark.as_deref().unwrap_or("none"),
+    );
+    println!("{}", report.summary());
+    Ok(())
+}

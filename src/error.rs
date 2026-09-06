@@ -25,6 +25,8 @@ pub enum KilnError {
         #[source]
         source: parquet::errors::ParquetError,
     },
+    #[error("{0}")]
+    Environment(String),
 }
 
 impl KilnError {
