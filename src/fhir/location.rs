@@ -78,13 +78,13 @@ pub struct Location {
     pub fhir_json: String,
 }
 
-fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     obj.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 /// `Location/loc-1` -> `loc-1`; bare ids pass through. An empty reference, or
 /// one ending in `/`, has no usable id and yields `None`.
-fn strip_reference(reference: &str) -> Option<String> {
+pub(crate) fn strip_reference(reference: &str) -> Option<String> {
     let last = reference.rsplit('/').next().unwrap_or(reference);
     if last.is_empty() {
         None
@@ -134,7 +134,7 @@ fn first_coding_code(node: Option<&Value>) -> Option<String> {
 }
 
 /// First coding under `system` across a CodeableConcept or list of them.
-fn coding_code_by_system(node: Option<&Value>, system: &str) -> Option<String> {
+pub(crate) fn coding_code_by_system(node: Option<&Value>, system: &str) -> Option<String> {
     let concepts: Vec<&Value> = match node? {
         Value::Array(items) => items.iter().collect(),
         other => vec![other],

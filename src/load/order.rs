@@ -1,4 +1,6 @@
-//! Parents first: a resource is loaded after the `partOf` parent that is
+//! Organizations (any non-Location) first, then Locations parents first: a
+//! Location's managingOrganization must exist before the Location is
+//! written, and a resource is loaded after the `partOf` parent that is
 //! also in this set. References to resources not in the set count as
 //! roots. Stable, so siblings keep their input order.
 
@@ -52,15 +54,17 @@ pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
         .filter_map(|(i, r)| r.get("id")?.as_str().map(|id| (id, i)))
         .collect();
     let mut depths = vec![None; resources.len()];
-    let mut keyed: Vec<(usize, usize)> = Vec::with_capacity(resources.len());
+    let is_location =
+        |i: usize| resources[i].get("resourceType").and_then(Value::as_str) == Some("Location");
+    let mut keyed: Vec<(bool, usize, usize)> = Vec::with_capacity(resources.len());
     for i in 0..resources.len() {
-        keyed.push((depth(i, &resources, &by_id, &mut depths)?, i));
+        keyed.push((is_location(i), depth(i, &resources, &by_id, &mut depths)?, i));
     }
-    keyed.sort_by_key(|&(d, i)| (d, i));
+    keyed.sort_by_key(|&(l, d, i)| (l, d, i));
     let mut slots: Vec<Option<Value>> = resources.into_iter().map(Some).collect();
     Ok(keyed
         .into_iter()
-        .map(|(_, i)| slots[i].take().expect("each index once"))
+        .map(|(_, _, i)| slots[i].take().expect("each index once"))
         .collect())
 }
 
@@ -100,6 +104,17 @@ mod tests {
         let input = vec![loc("a", Some("b")), loc("b", Some("a"))];
         let err = order_parents_first(input).unwrap_err();
         assert!(matches!(&err, KilnError::Usage(m) if m.contains("cycle") && m.contains("Location/")), "{err}");
+    }
+
+    #[test]
+    fn organizations_come_before_every_location() {
+        let input = vec![
+            loc("clinic", Some("ward")),
+            json!({"resourceType": "Organization", "id": "org-clinic"}),
+            loc("ward", None),
+        ];
+        let out = order_parents_first(input).unwrap();
+        assert_eq!(ids(&out), vec!["org-clinic", "ward", "clinic"]);
     }
 
     #[test]

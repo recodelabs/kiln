@@ -1,6 +1,7 @@
 //! The snapshot directory: locations.ndjson, state.json, the boundary cache,
 //! and the in-progress incoming file. See README "The snapshot".
 
+pub mod index;
 pub mod instant;
 pub mod merge;
 
@@ -12,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{KilnError, Result};
 
 pub const LOCATIONS_FILE: &str = "locations.ndjson";
+pub const ORGANIZATIONS_FILE: &str = "organizations.ndjson";
+pub const INCOMING_ORGANIZATIONS_FILE: &str = ".incoming-organizations.ndjson";
 pub const STATE_FILE: &str = "state.json";
 pub const INCOMING_FILE: &str = ".incoming.ndjson";
 pub const BOUNDARIES_DIR: &str = "boundaries";
@@ -34,6 +37,15 @@ impl Snapshot {
     pub fn locations_tmp(&self) -> PathBuf {
         self.dir.join(format!("{LOCATIONS_FILE}.tmp"))
     }
+    pub fn organizations(&self) -> PathBuf {
+        self.dir.join(ORGANIZATIONS_FILE)
+    }
+    pub fn organizations_tmp(&self) -> PathBuf {
+        self.dir.join(format!("{ORGANIZATIONS_FILE}.tmp"))
+    }
+    pub fn incoming_organizations(&self) -> PathBuf {
+        self.dir.join(INCOMING_ORGANIZATIONS_FILE)
+    }
     pub fn state_path(&self) -> PathBuf {
         self.dir.join(STATE_FILE)
     }
@@ -54,6 +66,10 @@ pub struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<String>,
     pub count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_watermark: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_count: Option<usize>,
     pub kiln_version: String,
     pub completed_at: String,
 }
@@ -116,6 +132,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn organization_paths_and_optional_state_fields() {
+        let s = Snapshot::new(std::path::Path::new("/x"));
+        assert_eq!(s.organizations(), std::path::PathBuf::from("/x/organizations.ndjson"));
+        assert_eq!(s.organizations_tmp(), std::path::PathBuf::from("/x/organizations.ndjson.tmp"));
+        assert_eq!(s.incoming_organizations(), std::path::PathBuf::from("/x/.incoming-organizations.ndjson"));
+
+        // A plan 2 state file has no organization fields and must still load.
+        let old = r#"{"server":"s","watermark":"2026-01-01T00:00:00Z","count":1,"kiln_version":"0.2.0","completed_at":"2026-01-01T00:00:00Z"}"#;
+        let st: State = serde_json::from_str(old).unwrap();
+        assert_eq!(st.organization_watermark, None);
+        assert_eq!(st.organization_count, None);
+        let text = serde_json::to_string(&st).unwrap();
+        assert!(!text.contains("organization"), "absent fields stay absent: {text}");
+    }
+
+    #[test]
     fn paths_are_under_the_snapshot_dir() {
         let s = Snapshot::new(std::path::Path::new("/x"));
         assert_eq!(
@@ -143,6 +175,8 @@ mod tests {
             server: "https://f/fhir".into(),
             watermark: Some("2026-01-01T00:00:00Z".into()),
             count: 3,
+            organization_watermark: None,
+            organization_count: None,
             kiln_version: "0.2.0".into(),
             completed_at: "2026-01-01T00:00:01Z".into(),
         };
@@ -162,6 +196,8 @@ mod tests {
             server: "s".into(),
             watermark: None,
             count: 0,
+            organization_watermark: None,
+            organization_count: None,
             kiln_version: "v".into(),
             completed_at: "t".into(),
         }

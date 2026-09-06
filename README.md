@@ -214,6 +214,7 @@ between runs.
 ```
 snapshot/
   locations.ndjson       one Location resource per line, boundaries inlined
+  organizations.ndjson   one Organization per line, for the facility pairing
   state.json             server URL, watermark, resource count, kiln version
   boundaries/            content addressed cache of fetched boundary attachments
   _extract_report.json   issues found by the last successful extract
@@ -236,6 +237,12 @@ is a sequential pass and takes seconds even for a large country. Running an
 incremental extract against a different server than the snapshot came from
 is refused; `--full` repoints it. `--since INSTANT` overrides the stored
 watermark for one run.
+
+Organizations are paged after Locations with their own watermark,
+`organization_watermark` in `state.json`, and merged the same way. A
+snapshot written before kiln extracted Organizations has no file and no
+watermark, so the next run fetches them in full while Locations stay
+incremental.
 
 Extract runs in three phases. It pages the search into `.incoming.ndjson`,
 noting ids, timestamps and boundary URLs; it fetches the distinct boundary
@@ -273,8 +280,9 @@ these kinds: `page_resource_skipped` (a bundle entry with no resource object
 or no id), `boundary_fetch_failed` (the attachment is left as a URL),
 `boundary_stale_from_cache` (under `--refresh` the refetch failed and the
 cached copy was used), `cache_error` (an unreadable or unwritable cache
-entry, treated as a miss), and `snapshot_line_unparsed` (a line in the old
-snapshot with no id, copied unchanged).
+entry, treated as a miss), `snapshot_line_unparsed` (a line in the old
+snapshot with no id, copied unchanged), and `organization_line_unparsed`
+(the same for `organizations.ndjson`).
 
 ### Incremental extract and its limits
 
@@ -367,6 +375,17 @@ whether an edit to the column will flow back to FHIR.
 | `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
 | `pcode`, `gers_id` | promoted from `identifier` by system, for convenience; `pcode` comes from the ICR pcode system, or failing that the `national-admin-code` system |
 | `settlement_type`, `delivery_strategy`, `facility_level`, `ownership` | the ICR profile extensions |
+| `nhfr_code`, `nhfr_uid` | promoted from the paired Organization's `identifier` by system |
+| `organization_identifier` | the paired Organization's `identifier`, list of struct `{system, value}` |
+| `facility_level_text`, `ownership_text` | the `text` of the paired Organization's `type` concepts holding those codings |
+
+A facility in the ICR registry is a Location paired with an Organization
+(`org-<location id>`) that carries the registry codes and the institution's
+name and type. Rows whose Location names a managing organisation that is in
+the snapshot carry its fields; the Location's own `facility_level` and
+`ownership` codings are what the row shows for those two. A Location whose
+Organization is missing is reported as `organization_missing`, and a name
+that differs between the two as `organization_name_mismatch`.
 
 A Location with both a boundary and a position is one row: the polygon is the
 geometry, and the position is kept in its own columns.
@@ -392,6 +411,7 @@ geometry, and the position is kept in its own columns.
 | column | content |
 |---|---|
 | `fhir_json` | the complete Location resource as JSON text, with the boundary attachment removed |
+| `organization_json` | the complete paired Organization as JSON text; null when there is none |
 
 The last column is the guarantee that the projection loses nothing. Any field
 kiln does not model as a column is still there, queryable with DuckDB's JSON
@@ -428,6 +448,7 @@ The kinds, grouped by where they arise:
   `no_country`, `admin_level_beyond_columns`
 - Dataset: `duplicate_pcode`, `point_outside_parent`, `small_partition`,
   `partition_value_sanitized`, `partition_value_collision`, `row_vanished`
+- Organization pairing: `organization_missing`, `organization_name_mismatch`
 
 ---
 
@@ -554,7 +575,11 @@ resource *should* now be:
    `description` has to mean "clear it" or a cleared field could never
    round trip. `identifier` is replaced as a whole list, then `pcode` and
    `gers_id` upsert their entry into it. A list column may arrive as a JSON
-   string, which is how GDAL exports nested fields.
+   string, which is how GDAL exports nested fields. On a facility row,
+   `name`, `status`, `facility_level` and `ownership` apply to both the
+   Location and its Organization when edited; the NHFR codes, the type
+   labels and `organization_identifier` apply to the Organization only. A
+   new `type = facility` row creates both, the Organization first.
 3. Apply the geometry to what it came from. A row whose snapshot resource
    has a boundary gets its boundary attachment replaced when the polygon
    differs; a row without one gets its `position` moved when the point
@@ -580,8 +605,8 @@ the summary is always printed. The kinds are `duplicate_id`,
 `new_location`, `new_location_generated_id`, `input_column_type` (a
 writable column holding a value of the wrong type, ignored for that row),
 `geometry_unparseable`, `geometry_kind_changed`, `geometry_invalid`,
-`position_geometry_disagree`, `boundary_z_dropped` and
-`snapshot_line_unparsed`.
+`position_geometry_disagree`, `boundary_z_dropped`,
+`organization_missing` and `snapshot_line_unparsed`.
 
 ### load
 
@@ -607,6 +632,9 @@ committed, and re-running the same file is safe because every entry is a
 PUT by id with a version check. The fix is to extract again, re-apply the
 edit, and diff again. This is what makes it safe for a GIS user to edit a
 copy that might be a day old.
+
+Organizations are posted before Locations, so a new pair resolves within
+the run.
 
 `--dry-run` runs the preflight and prints one line per bundle, naming each
 entry as `create` or `update@<version>`, without posting anything.

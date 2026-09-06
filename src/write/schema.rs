@@ -90,6 +90,19 @@ pub fn output_schema() -> SchemaRef {
         utf8("delivery_strategy"),
         utf8("facility_level"),
         utf8("ownership"),
+        utf8("nhfr_code"),
+        utf8("nhfr_uid"),
+        Field::new(
+            "organization_identifier",
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(identifier_fields()),
+                true,
+            ))),
+            true,
+        ),
+        utf8("facility_level_text"),
+        utf8("ownership_text"),
         Field::new("depth", DataType::Int32, false),
         Field::new("admin_level", DataType::Int32, true),
         Field::new("tier", DataType::Utf8, false),
@@ -104,6 +117,7 @@ pub fn output_schema() -> SchemaRef {
     }
     fields.extend([
         list_utf8("overlays_admin_unit_ids"),
+        utf8("organization_json"),
         Field::new("country", DataType::Utf8, false),
         Field::new("geom_type", DataType::Utf8, false),
         Field::new("lon", DataType::Float64, false),
@@ -138,6 +152,11 @@ pub struct OutputRow {
     pub delivery_strategy: Option<String>,
     pub facility_level: Option<String>,
     pub ownership: Option<String>,
+    pub nhfr_code: Option<String>,
+    pub nhfr_uid: Option<String>,
+    pub organization_identifier: Vec<(Option<String>, Option<String>)>,
+    pub facility_level_text: Option<String>,
+    pub ownership_text: Option<String>,
     pub depth: i32,
     pub admin_level: Option<i32>,
     pub tier: String,
@@ -146,6 +165,7 @@ pub struct OutputRow {
     pub admin_names: [Option<String>; ADMIN_COLUMNS],
     pub admin_codes: [Option<String>; ADMIN_COLUMNS],
     pub overlays_admin_unit_ids: Vec<String>,
+    pub organization_json: Option<String>,
     pub country: String,
     pub geom_type: String,
     pub lon: f64,
@@ -178,6 +198,11 @@ pub struct RowBatch {
     delivery_strategy: StringBuilder,
     facility_level: StringBuilder,
     ownership: StringBuilder,
+    nhfr_code: StringBuilder,
+    nhfr_uid: StringBuilder,
+    organization_identifier: ListBuilder<StructBuilder>,
+    facility_level_text: StringBuilder,
+    ownership_text: StringBuilder,
     depth: Int32Builder,
     admin_level: Int32Builder,
     tier: StringBuilder,
@@ -186,6 +211,7 @@ pub struct RowBatch {
     admin_names: Vec<StringBuilder>,
     admin_codes: Vec<StringBuilder>,
     overlays: ListBuilder<StringBuilder>,
+    organization_json: StringBuilder,
     country: StringBuilder,
     geom_type: StringBuilder,
     lon: Float64Builder,
@@ -194,6 +220,23 @@ pub struct RowBatch {
     bbox: StructBuilder,
     fhir_json: StringBuilder,
     pub rows: usize,
+}
+
+fn push_identifiers(
+    b: &mut ListBuilder<StructBuilder>,
+    items: &[(Option<String>, Option<String>)],
+) {
+    let sb = b.values();
+    for (system, value) in items {
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_option(system.as_deref());
+        sb.field_builder::<StringBuilder>(1)
+            .unwrap()
+            .append_option(value.as_deref());
+        sb.append(true);
+    }
+    b.append(true);
 }
 
 fn push_list(b: &mut ListBuilder<StringBuilder>, items: &[String]) {
@@ -227,6 +270,14 @@ impl RowBatch {
             delivery_strategy: StringBuilder::new(),
             facility_level: StringBuilder::new(),
             ownership: StringBuilder::new(),
+            nhfr_code: StringBuilder::new(),
+            nhfr_uid: StringBuilder::new(),
+            organization_identifier: ListBuilder::new(StructBuilder::from_fields(
+                identifier_fields(),
+                0,
+            )),
+            facility_level_text: StringBuilder::new(),
+            ownership_text: StringBuilder::new(),
             depth: Int32Builder::new(),
             admin_level: Int32Builder::new(),
             tier: StringBuilder::new(),
@@ -235,6 +286,7 @@ impl RowBatch {
             admin_names: (0..ADMIN_COLUMNS).map(|_| StringBuilder::new()).collect(),
             admin_codes: (0..ADMIN_COLUMNS).map(|_| StringBuilder::new()).collect(),
             overlays: ListBuilder::new(StringBuilder::new()),
+            organization_json: StringBuilder::new(),
             country: StringBuilder::new(),
             geom_type: StringBuilder::new(),
             lon: Float64Builder::new(),
@@ -259,19 +311,7 @@ impl RowBatch {
         self.part_of.append_option(r.part_of.as_deref());
         self.managing_organization
             .append_option(r.managing_organization.as_deref());
-        {
-            let sb = self.identifier.values();
-            for (system, value) in &r.identifier {
-                sb.field_builder::<StringBuilder>(0)
-                    .unwrap()
-                    .append_option(system.as_deref());
-                sb.field_builder::<StringBuilder>(1)
-                    .unwrap()
-                    .append_option(value.as_deref());
-                sb.append(true);
-            }
-            self.identifier.append(true);
-        }
+        push_identifiers(&mut self.identifier, &r.identifier);
         self.position_longitude
             .append_option(r.position.map(|p| p.0));
         self.position_latitude
@@ -285,6 +325,12 @@ impl RowBatch {
         self.facility_level
             .append_option(r.facility_level.as_deref());
         self.ownership.append_option(r.ownership.as_deref());
+        self.nhfr_code.append_option(r.nhfr_code.as_deref());
+        self.nhfr_uid.append_option(r.nhfr_uid.as_deref());
+        push_identifiers(&mut self.organization_identifier, &r.organization_identifier);
+        self.facility_level_text
+            .append_option(r.facility_level_text.as_deref());
+        self.ownership_text.append_option(r.ownership_text.as_deref());
         self.depth.append_value(r.depth);
         self.admin_level.append_option(r.admin_level);
         self.tier.append_value(&r.tier);
@@ -300,6 +346,8 @@ impl RowBatch {
             code_builder.append_option(code.as_deref());
         }
         push_list(&mut self.overlays, &r.overlays_admin_unit_ids);
+        self.organization_json
+            .append_option(r.organization_json.as_deref());
         self.country.append_value(&r.country);
         self.geom_type.append_value(&r.geom_type);
         self.lon.append_value(r.lon);
@@ -342,6 +390,11 @@ impl RowBatch {
             Arc::new(self.delivery_strategy.finish()),
             Arc::new(self.facility_level.finish()),
             Arc::new(self.ownership.finish()),
+            Arc::new(self.nhfr_code.finish()),
+            Arc::new(self.nhfr_uid.finish()),
+            Arc::new(self.organization_identifier.finish()),
+            Arc::new(self.facility_level_text.finish()),
+            Arc::new(self.ownership_text.finish()),
             Arc::new(self.depth.finish()),
             Arc::new(self.admin_level.finish()),
             Arc::new(self.tier.finish()),
@@ -356,6 +409,7 @@ impl RowBatch {
         }
         cols.extend([
             Arc::new(self.overlays.finish()) as ArrayRef,
+            Arc::new(self.organization_json.finish()),
             Arc::new(self.country.finish()),
             Arc::new(self.geom_type.finish()),
             Arc::new(self.lon.finish()),
@@ -389,6 +443,14 @@ mod tests {
         assert!(names.contains(&"identifier"));
         assert!(names.contains(&"position_longitude"));
         assert!(names.contains(&"admin4_code"));
+        let pos = |n: &str| names.iter().position(|x| *x == n).unwrap();
+        assert!(pos("ownership") < pos("nhfr_code"));
+        assert!(pos("nhfr_code") < pos("nhfr_uid"));
+        assert!(pos("nhfr_uid") < pos("organization_identifier"));
+        assert!(pos("organization_identifier") < pos("facility_level_text"));
+        assert!(pos("facility_level_text") < pos("ownership_text"));
+        assert!(pos("overlays_admin_unit_ids") < pos("organization_json"));
+        assert!(pos("organization_json") < pos("country"));
         assert_eq!(
             &names[names.len() - 3..],
             &["geometry", "bbox", "fhir_json"]
@@ -421,6 +483,9 @@ mod tests {
             wkb: vec![1, 0, 0, 0, 0],
             bbox: [1.0, 2.0, 1.0, 2.0],
             fhir_json: "{}".into(),
+            nhfr_code: Some("05/08".into()),
+            organization_identifier: vec![(Some("s".into()), Some("v".into()))],
+            organization_json: Some("{}".into()),
             ..Default::default()
         };
         batch.push(&row);
@@ -429,6 +494,17 @@ mod tests {
         assert_eq!(batch.rows, 0, "finish resets the batch");
         assert_eq!(rb.num_rows(), 1);
         assert_eq!(rb.schema().fields().len(), output_schema().fields().len());
+        let text = |name: &str| {
+            rb.column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .unwrap()
+                .value(0)
+                .to_string()
+        };
+        assert_eq!(text("nhfr_code"), "05/08");
+        assert_eq!(text("organization_json"), "{}");
         let ids = rb.column_by_name("id").unwrap();
         assert_eq!(
             ids.as_any()

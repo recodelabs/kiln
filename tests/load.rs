@@ -254,3 +254,23 @@ fn input_problems_are_usage_errors_before_any_request() {
         .code(2)
         .stderr(predicates::str::contains("--batch-size"));
 }
+
+#[test]
+fn organizations_are_posted_before_their_locations() {
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let mut clinic = loc("clinic", Some("2"), None);
+    clinic["managingOrganization"] = json!({"reference": "Organization/org-clinic"});
+    let org = json!({"resourceType": "Organization", "id": "org-clinic", "name": "clinic", "meta": {"versionId": "5"}});
+    let input = write_ndjson(dir.path(), &[clinic, org]);
+    expect_metadata(&server, true);
+    server.expect(
+        Expectation::matching(posted_bundle(|b| {
+            b["entry"][0]["request"] == json!({"method": "PUT", "url": "Organization/org-clinic", "ifMatch": "W/\"5\""})
+                && b["entry"][1]["request"]["url"] == "Location/clinic"
+        }))
+        .times(1)
+        .respond_with(ok(transaction_response())),
+    );
+    load(&server, &input, &[]).success();
+}
