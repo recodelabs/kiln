@@ -15,6 +15,7 @@ use crate::fhir::location::{
 };
 use crate::fhir::organization::{NHFR_CODE_SYSTEM, NHFR_UID_SYSTEM, ORGANIZATION_TYPE_SYSTEM};
 use crate::fhir::{Boundary, Location};
+use crate::fhir::spatial::{refresh_cells, remove_all_cells};
 use crate::geometry::{kind_name, parse_boundary, validity};
 use crate::report::Report;
 
@@ -42,7 +43,19 @@ pub fn rebuild(
     for (name, value) in &row.columns {
         apply_column(&mut obj, name, value);
     }
+    let position_before = position_of(&obj);
     apply_position(&mut obj, row, &id, report);
+    let position_after = position_of(&obj);
+    if position_after != position_before {
+        // Spatial-index cells are a function of the position: recompute the
+        // ones already on the resource, or drop them all if it was cleared.
+        match position_after {
+            Some((lon, lat)) => {
+                refresh_cells(&mut obj, lon, lat);
+            }
+            None => remove_all_cells(&mut obj),
+        }
+    }
     if let Some(geom) = &row.geometry {
         apply_geometry(&mut obj, &id, snapshot, geom, report);
     }

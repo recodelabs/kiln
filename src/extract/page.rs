@@ -114,7 +114,7 @@ pub fn page_resources(
     let mut seen: HashSet<String> = HashSet::new();
     let mut notes = Vec::new();
     let mut pages = 0usize;
-    let mut last_page_len = 0usize;
+    let mut last_page_len;
 
     loop {
         let current = url.to_string();

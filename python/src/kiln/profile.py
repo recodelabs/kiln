@@ -403,6 +403,7 @@ def build_point_location(
     position: tuple[float, float] | None = None,
     managing_org_id: str | None = None,
     extra_type_concepts: list[tuple[str, str, str, str | None]] | None = None,
+    spatial_cells: list[tuple[str, int, str]] | None = None,
 ) -> dict:
     """Build one site-shaped Location (facility, school, ...) per ICRLocation.
 
@@ -440,6 +441,12 @@ def build_point_location(
         resource["managingOrganization"] = {
             "reference": f"Organization/{managing_org_id}"
         }
+    if spatial_cells:
+        from kiln.spatial import spatial_index_extension
+
+        resource["extension"] = [
+            spatial_index_extension(scheme, level, cell) for scheme, level, cell in spatial_cells
+        ]
     return resource
 
 

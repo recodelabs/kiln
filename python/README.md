@@ -243,6 +243,15 @@ duplication for Location-only consumers. Organization.type stays
 authoritative; the copy is what makes `facility_level` and `ownership`
 come out as columns in the GeoParquet export.
 
+`--spatial-index SCHEME:LEVEL` (repeatable) writes the ICR `spatial-index`
+extension — the tile the point falls in — on every row that has a position:
+`--spatial-index quadkey:18` gives the zoom-18 quadkey (about 150 m tiles at
+Nigeria's latitudes; every prefix is the containing tile at a coarser zoom,
+so `Location?quadkey=0313131` on the server is a containment query),
+`geohash:8` a geohash. H3 is reserved for a later round. Rows without a
+position get no cell. For Locations already loaded without one, the Rust
+binary's `kiln index` backfills the same extension as a version-checked edit.
+
 By default only the feature level carries geometry — the minted ancestors
 (state, LGA) are boundary-less until an authoritative file for their level
 is loaded. Pass `--dissolve-parents` to give every ancestor a *derived*

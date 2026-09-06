@@ -69,6 +69,9 @@ pub struct Location {
     pub facility_level: Option<String>,
     pub ownership: Option<String>,
     pub overlays_admin_unit_ids: Vec<String>,
+    /// Spatial index cells (quadkey / h3 / geohash + level) from the
+    /// spatial-index extension; derived from `position` by kiln.
+    pub spatial_cells: Vec<crate::fhir::spatial::SpatialCell>,
     /// (longitude, latitude), FHIR order.
     pub position: Option<(f64, f64)>,
     pub boundary: Option<Boundary>,
@@ -374,6 +377,15 @@ impl Location {
                         loc.settlement_type = str_field(e, "valueCode");
                     } else if url == DELIVERY_STRATEGY_EXTENSION_URL {
                         loc.delivery_strategy = str_field(e, "valueCode");
+                    } else if url == crate::fhir::spatial::SPATIAL_INDEX_EXTENSION_URL {
+                        match crate::fhir::spatial::cell_from_extension(e) {
+                            Some(cell) => loc.spatial_cells.push(cell),
+                            None => report.add(
+                                "malformed_field",
+                                &id,
+                                "spatial-index extension lacks system, level or cell",
+                            ),
+                        }
                     }
                 }
             }

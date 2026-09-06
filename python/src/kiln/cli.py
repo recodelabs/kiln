@@ -41,6 +41,7 @@ from kiln.points import (
 from kiln.profile import BOUNDARY_EXTENSION_URLS, NATIONAL_ADMIN_CODE_SYSTEM, shred
 from kiln.report import Report, check_duplicate_pcodes, check_points_within_parents
 from kiln.shape import as_list
+from kiln.spatial import parse_spatial_index_arg
 from kiln.write import (
     DEFAULT_PARTITION_BY,
     DEFAULT_ROW_GROUP_SIZE,
@@ -270,6 +271,7 @@ def cmd_bake_points(args: argparse.Namespace) -> int:
             org_identifiers=[parse_identifier_arg(i) for i in args.org_identifier],
             org_type_codings=[parse_org_type_arg(i) for i in args.org_type_coding],
             type_codings=[parse_org_type_arg(i) for i in args.type_coding],
+            spatial_indexes=[parse_spatial_index_arg(i) for i in args.spatial_index],
         )
     except BakeError as exc:
         print(f"kiln bake-points: {exc}", file=sys.stderr)
@@ -527,6 +529,17 @@ def build_parser() -> argparse.ArgumentParser:
             "SYSTEM_URI=CODE_COLUMN[:TEXT_COLUMN] appended to Location.type "
             "after the functional code -- the mCSD-sanctioned copy of the "
             "classification axes for Location-only consumers"
+        ),
+    )
+    points_cmd.add_argument(
+        "--spatial-index",
+        dest="spatial_index",
+        action="append",
+        default=[],
+        help=(
+            "SCHEME:LEVEL, repeatable -- write the ICR spatial-index extension "
+            "(the tile the point falls in) on every row with a position, e.g. "
+            "quadkey:18 (zoom 18, ~150 m tiles) or geohash:8; h3 is reserved"
         ),
     )
     points_cmd.add_argument("--out", required=True, help="Output NDJSON file")

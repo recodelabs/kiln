@@ -1,6 +1,7 @@
 pub mod location;
 pub mod ndjson;
 pub mod organization;
+pub mod spatial;
 
 pub use location::{Boundary, Location};
 pub use organization::Organization;

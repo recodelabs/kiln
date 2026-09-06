@@ -88,6 +88,8 @@ pub fn output_schema() -> SchemaRef {
         utf8("gers_id"),
         utf8("settlement_type"),
         utf8("delivery_strategy"),
+        utf8("quadkey"),
+        Field::new("quadkey_level", DataType::Int32, true),
         utf8("facility_level"),
         utf8("ownership"),
         utf8("nhfr_code"),
@@ -150,6 +152,10 @@ pub struct OutputRow {
     pub gers_id: Option<String>,
     pub settlement_type: Option<String>,
     pub delivery_strategy: Option<String>,
+    /// The deepest quadkey cell on the Location (spatial-index extension);
+    /// its prefixes are every coarser tile. Read-only: derived from position.
+    pub quadkey: Option<String>,
+    pub quadkey_level: Option<i32>,
     pub facility_level: Option<String>,
     pub ownership: Option<String>,
     pub nhfr_code: Option<String>,
@@ -196,6 +202,8 @@ pub struct RowBatch {
     gers_id: StringBuilder,
     settlement_type: StringBuilder,
     delivery_strategy: StringBuilder,
+    quadkey: StringBuilder,
+    quadkey_level: Int32Builder,
     facility_level: StringBuilder,
     ownership: StringBuilder,
     nhfr_code: StringBuilder,
@@ -268,6 +276,8 @@ impl RowBatch {
             gers_id: StringBuilder::new(),
             settlement_type: StringBuilder::new(),
             delivery_strategy: StringBuilder::new(),
+            quadkey: StringBuilder::new(),
+            quadkey_level: Int32Builder::new(),
             facility_level: StringBuilder::new(),
             ownership: StringBuilder::new(),
             nhfr_code: StringBuilder::new(),
@@ -322,6 +332,8 @@ impl RowBatch {
             .append_option(r.settlement_type.as_deref());
         self.delivery_strategy
             .append_option(r.delivery_strategy.as_deref());
+        self.quadkey.append_option(r.quadkey.as_deref());
+        self.quadkey_level.append_option(r.quadkey_level);
         self.facility_level
             .append_option(r.facility_level.as_deref());
         self.ownership.append_option(r.ownership.as_deref());
@@ -388,6 +400,8 @@ impl RowBatch {
             Arc::new(self.gers_id.finish()),
             Arc::new(self.settlement_type.finish()),
             Arc::new(self.delivery_strategy.finish()),
+            Arc::new(self.quadkey.finish()),
+            Arc::new(self.quadkey_level.finish()),
             Arc::new(self.facility_level.finish()),
             Arc::new(self.ownership.finish()),
             Arc::new(self.nhfr_code.finish()),
