@@ -281,8 +281,9 @@ or no id), `boundary_fetch_failed` (the attachment is left as a URL),
 `boundary_stale_from_cache` (under `--refresh` the refetch failed and the
 cached copy was used), `cache_error` (an unreadable or unwritable cache
 entry, treated as a miss), `snapshot_line_unparsed` (a line in the old
-snapshot with no id, copied unchanged), and `organization_line_unparsed`
-(the same for `organizations.ndjson`).
+snapshot with no id, copied unchanged), `organization_line_unparsed`
+(the same for `organizations.ndjson`), and `count_mismatch` (the server's
+resource count differs from the snapshot's after an incremental run).
 
 ### Incremental extract and its limits
 
@@ -299,6 +300,14 @@ rules follow:
   to them.
 - `kiln extract --full` discards the snapshot and fetches everything. Run it
   occasionally, or whenever you suspect drift.
+
+To make drift visible, every incremental run ends by asking the server for
+its resource count per type (`_summary=count`, or a zero-row search with
+`_total=accurate` for servers such as the Google Healthcare API that reject
+`_summary`) and comparing it with the snapshot. A difference is reported as `count_mismatch`, naming the two
+numbers and pointing at `--full`; it cannot say which resource went, only
+that one did. A server that returns no total is noted on stderr and the
+check is skipped.
 
 ---
 

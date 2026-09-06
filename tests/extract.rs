@@ -106,7 +106,25 @@ fn full_search() -> impl Matcher<Req> {
     all_of![
         request::method_path("GET", "/fhir/Location"),
         request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+        request::query(url_decoded(not(contains(key("_summary"))))),
     ]
+}
+
+/// Answers the `_summary=count` cross-check an incremental run makes, for
+/// both resource types, any number of times.
+fn expect_counts(server: &Server, locations: usize, organizations: usize) {
+    for (path, total) in [("/fhir/Location", locations), ("/fhir/Organization", organizations)] {
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", path),
+                request::query(url_decoded(contains(("_summary", "count")))),
+            ])
+            .times(0..)
+            .respond_with(ok(
+                json!({"resourceType": "Bundle", "type": "searchset", "total": total}).to_string(),
+            )),
+        );
+    }
 }
 
 /// `GET <base>/Location?_lastUpdated=ge<since>`: an incremental extract.
@@ -135,8 +153,11 @@ fn org_since_search(since: &str) -> impl Matcher<Req> {
 /// Locations answer that search with an empty bundle, any number of times.
 fn expect_no_organizations(server: &Server) {
     server.expect(
-        Expectation::matching(request::method_path("GET", "/fhir/Organization"))
-            .times(0..)
+        Expectation::matching(all_of![
+            request::method_path("GET", "/fhir/Organization"),
+            request::query(url_decoded(not(contains(key("_summary"))))),
+        ])
+        .times(0..)
             .respond_with(ok(bundle(vec![], None))),
     );
 }
@@ -231,6 +252,7 @@ fn full_extract_writes_snapshot_state_and_inlines_boundaries() {
 #[test]
 fn second_run_with_nothing_new_leaves_the_snapshot_byte_identical() {
     let server = Server::run();
+    expect_counts(&server, 2, 0);
     expect_no_organizations(&server);
     let snap = tempfile::tempdir().unwrap();
     let burl = server.url("/b/b.geojson").to_string();
@@ -282,6 +304,7 @@ fn second_run_with_nothing_new_leaves_the_snapshot_byte_identical() {
 #[test]
 fn incremental_run_upserts_and_advances_the_watermark() {
     let server = Server::run();
+    expect_counts(&server, 3, 0);
     expect_no_organizations(&server);
     let snap = tempfile::tempdir().unwrap();
     let burl = server.url("/b/b.geojson").to_string();
@@ -366,6 +389,7 @@ fn full_flag_replaces_the_snapshot() {
 #[test]
 fn snapshot_without_state_is_treated_as_full_unless_since() {
     let server = Server::run();
+    expect_counts(&server, 1, 0);
     expect_no_organizations(&server);
     let snap = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -601,6 +625,7 @@ fn no_cache_still_inlines() {
 #[test]
 fn second_run_hits_the_cache() {
     let server = Server::run();
+    expect_counts(&server, 1, 0);
     expect_no_organizations(&server);
     let snap = tempfile::tempdir().unwrap();
     let burl = server.url("/b/b.geojson").to_string();
@@ -1075,6 +1100,7 @@ fn an_unwritable_snapshot_dir_is_a_usage_error() {
 #[test]
 fn organizations_are_paged_after_locations_with_their_own_watermark() {
     let server = Server::run();
+    expect_counts(&server, 1, 2);
     let snap = tempfile::tempdir().unwrap();
     server.expect(
         Expectation::matching(full_search())
@@ -1085,6 +1111,7 @@ fn organizations_are_paged_after_locations_with_their_own_watermark() {
         Expectation::matching(all_of![
             request::method_path("GET", "/fhir/Organization"),
             request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+            request::query(url_decoded(not(contains(key("_summary"))))),
         ])
         .times(1)
         .respond_with(ok(bundle(vec![org("org-a", "2026-02-01T00:00:00Z", "A")], None))),
@@ -1119,6 +1146,7 @@ fn organizations_are_paged_after_locations_with_their_own_watermark() {
 #[test]
 fn a_snapshot_without_organizations_fetches_them_in_full() {
     let server = Server::run();
+    expect_counts(&server, 1, 1);
     let snap = tempfile::tempdir().unwrap();
     // A plan 2 snapshot: locations and a state file with no organization fields.
     std::fs::write(snap.path().join("locations.ndjson"), format!("{}\n", loc("a", "2026-01-01T00:00:00Z", None))).unwrap();
@@ -1137,6 +1165,7 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
         Expectation::matching(all_of![
             request::method_path("GET", "/fhir/Organization"),
             request::query(url_decoded(not(contains(key("_lastUpdated"))))),
+            request::query(url_decoded(not(contains(key("_summary"))))),
         ])
         .times(1)
         .respond_with(ok(bundle(vec![org("org-a", "2026-02-01T00:00:00Z", "A")], None))),
@@ -1144,4 +1173,41 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
     extract(&server, snap.path(), &[]).success();
     assert_eq!(org_lines(snap.path()).len(), 1);
     assert_eq!(state(snap.path())["organization_watermark"], "2026-02-01T00:00:00Z");
+}
+
+#[test]
+fn a_deletion_on_the_server_is_reported_by_the_count_check() {
+    let server = Server::run();
+    expect_no_organizations(&server);
+    let snap = tempfile::tempdir().unwrap();
+    server.expect(
+        Expectation::matching(full_search())
+            .times(1)
+            .respond_with(ok(bundle(
+                vec![loc("a", "2026-01-01T00:00:00Z", None), loc("b", "2026-01-02T00:00:00Z", None)],
+                None,
+            ))),
+    );
+    let first = extract(&server, snap.path(), &[]).success();
+    assert!(!stdout(&first).contains("count_mismatch"), "a full run makes no count check");
+
+    // "a" was deleted on the server; the incremental search cannot show that.
+    server.expect(
+        Expectation::matching(since_search("2026-01-02T00:00:00Z"))
+            .times(1)
+            .respond_with(ok(bundle(vec![], None))),
+    );
+    expect_counts(&server, 1, 0);
+    let second = extract(&server, snap.path(), &[]).success();
+    let out = stdout(&second);
+    assert!(out.contains("count_mismatch: 1"), "{out}");
+    assert_eq!(lines(snap.path()).len(), 2, "the snapshot itself is untouched");
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap(),
+    )
+    .unwrap();
+    let issue = &report["issues"][0];
+    assert_eq!(issue["kind"], "count_mismatch");
+    assert_eq!(issue["location_id"], "Location");
+    assert!(issue["detail"].as_str().unwrap().contains("--full"), "{issue}");
 }

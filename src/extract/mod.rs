@@ -13,7 +13,7 @@ use crate::error::{KilnError, Result};
 use crate::extract::boundary::{fetch_boundaries, FetchOptions};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
-use crate::extract::page::{page_locations, page_resources};
+use crate::extract::page::{count_resources, page_locations, page_resources};
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
 use crate::snapshot::merge::{merge, merge_file, MergeFiles};
@@ -234,6 +234,32 @@ fn run_phases(
         &HashMap::new(),
         &mut report,
     )?;
+
+    // Deletions are invisible to an incremental search: a deleted resource
+    // appears in no result. Compare the server's count with the merged
+    // snapshot's so a drifted snapshot is at least reported. A full run
+    // matches by construction and skips the request.
+    for (resource_type, snapshot_total, incremental) in [
+        ("Location", stats.total, !full),
+        ("Organization", org_stats.total, org_since.is_some()),
+    ] {
+        if !incremental {
+            continue;
+        }
+        match count_resources(&client, &args.server, resource_type) {
+            Some(server_total) if server_total as usize != snapshot_total => report.add(
+                "count_mismatch",
+                resource_type,
+                &format!(
+                    "the server has {server_total} {resource_type} resources but the snapshot has {snapshot_total}; \
+                     resources were probably deleted on the server, which an incremental extract cannot see. \
+                     Run kiln extract --full to resynchronise."
+                ),
+            ),
+            Some(_) => {}
+            None => eprintln!("count check unavailable for {resource_type}: the server returned no total"),
+        }
+    }
 
     let new_state = State {
         server: args.server.trim_end_matches('/').to_string(),
