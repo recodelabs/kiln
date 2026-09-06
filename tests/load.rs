@@ -61,6 +61,11 @@ fn capability(update_create: bool) -> String {
     .to_string()
 }
 
+fn capability_unstated() -> String {
+    json!({"resourceType": "CapabilityStatement", "rest": [{"resource": [{"type": "Location"}]}]})
+        .to_string()
+}
+
 fn expect_metadata(server: &Server, update_create: bool) {
     server.expect(
         Expectation::matching(request::method_path("GET", "/fhir/metadata"))
@@ -153,6 +158,26 @@ fn update_create_is_required_only_when_the_input_creates() {
             .respond_with(ok(transaction_response())),
     );
     load(&server, &input, &[]).success();
+}
+
+#[test]
+fn an_unstated_update_create_flag_warns_and_proceeds() {
+    // HAPI FHIR supports update-as-create but omits rest.resource.updateCreate.
+    let server = Server::run();
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_ndjson(dir.path(), &[loc("b", None, None)]);
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/fhir/metadata"))
+            .respond_with(ok(capability_unstated())),
+    );
+    server.expect(
+        Expectation::matching(any_bundle())
+            .times(1)
+            .respond_with(ok(transaction_response())),
+    );
+    load(&server, &input, &[])
+        .success()
+        .stderr(predicates::str::contains("does not state updateCreate for Location"));
 }
 
 #[test]
