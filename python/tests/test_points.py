@@ -132,6 +132,36 @@ def test_bake_points_with_no_resolvable_parent_has_no_partof():
     assert report.counts() == {"parent_unresolved": 1}
 
 
+def test_bake_points_writes_spatial_index_cells_for_positioned_rows():
+    from kiln.spatial import SPATIAL_INDEX_EXTENSION_URL, quadkey
+
+    report = Report()
+    rows = [facility_row(), facility_row(globalid="no-position", latitude="", longitude="")]
+    with_pos, without_pos = bake_points(
+        rows,
+        admin_registry(),
+        type_code="facility",
+        name_col="facility_name",
+        lat_col="latitude",
+        lon_col="longitude",
+        id_col="globalid",
+        parents=PARENTS,
+        identifiers=[(GRID3, "globalid")],
+        where=[],
+        report=report,
+        spatial_indexes=[("quadkey", 18), ("quadkey", 10)],
+    )
+    cells = [
+        (e["extension"][0]["valueCode"], e["extension"][1]["valueUnsignedInt"], e["extension"][2]["valueString"])
+        for e in with_pos["extension"]
+        if e["url"] == SPATIAL_INDEX_EXTENSION_URL
+    ]
+    assert cells == [("quadkey", 18, quadkey(9.9, 10.5, 18)), ("quadkey", 10, quadkey(9.9, 10.5, 10))]
+    assert cells[0][2].startswith(cells[1][2])
+    assert "extension" not in without_pos
+    assert report.counts() == {"missing_position": 1}
+
+
 def test_bake_points_where_filters_rows():
     rows = [facility_row(), facility_row(state="Kano", globalid="other-id")]
     resources = run_bake_points(rows, where=[("state", "Bauchi")])

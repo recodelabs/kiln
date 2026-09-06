@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from kiln.bake import BakeError, slugify
 from kiln.profile import build_facility_organization, build_point_location
 from kiln.report import Report
+from kiln.spatial import compute_cell
 
 # FHIR id: https://hl7.org/fhir/datatypes.html#id
 _FHIR_ID = re.compile(r"^[A-Za-z0-9\-.]{1,64}$")
@@ -158,6 +159,7 @@ def bake_points(
     org_identifiers: list[tuple[str, str]] | None = None,
     org_type_codings: list[tuple[str, str, str | None]] | None = None,
     type_codings: list[tuple[str, str, str | None]] | None = None,
+    spatial_indexes: list[tuple[str, int]] | None = None,
 ) -> list[dict]:
     """Turn point rows into site Location resources linked into the hierarchy.
 
@@ -179,6 +181,12 @@ def bake_points(
     functional code -- the mCSD-sanctioned duplication that lets
     Location-only consumers (GeoParquet exports, map layers) see the
     facility level and ownership without joining Organizations.
+
+    `spatial_indexes` -- (scheme, level) pairs such as ("quadkey", 18) --
+    adds one `spatial-index` extension per pair to every row that has a
+    position: the cell is a pure function of the point, computed here so
+    the registry never depends on a geometry engine to answer "what else
+    is in this tile". Rows without a position get no cell.
     """
     index = build_admin_index(admin_resources)
     resources: list[dict] = []
@@ -220,6 +228,14 @@ def bake_points(
                 )
             )
 
+        position = _read_position(row, lat_col, lon_col, row_label, report)
+        spatial_cells = None
+        if position is not None and spatial_indexes:
+            longitude, latitude = position
+            spatial_cells = [
+                (scheme, level, compute_cell(scheme, level, longitude, latitude))
+                for scheme, level in spatial_indexes
+            ]
         resources.append(
             build_point_location(
                 raw_id,
@@ -227,9 +243,10 @@ def bake_points(
                 type_code=type_code,
                 parent_id=resolve_parent(index, parents, row, row_label, report),
                 identifiers=_row_identifiers(row, identifiers),
-                position=_read_position(row, lat_col, lon_col, row_label, report),
+                position=position,
                 managing_org_id=org_id,
                 extra_type_concepts=_org_type_concepts(row, type_codings or []),
+                spatial_cells=spatial_cells,
             )
         )
 

@@ -324,6 +324,9 @@ fn write_partitions(
                 geometry_types.push(type_name.to_string());
             }
 
+            let (quadkey, quadkey_level) = crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells)
+                .map(|c| (Some(c.cell.clone()), Some(c.level as i32)))
+                .unwrap_or((None, None));
             let row = OutputRow {
                 id: loc.id,
                 version_id: loc.version_id.clone(),
@@ -346,6 +349,8 @@ fn write_partitions(
                 gers_id: loc.gers_id,
                 settlement_type: loc.settlement_type,
                 delivery_strategy: loc.delivery_strategy,
+                quadkey,
+                quadkey_level,
                 facility_level: loc.facility_level,
                 ownership: loc.ownership,
                 nhfr_code: org.as_ref().and_then(|o| o.nhfr_code.clone()),

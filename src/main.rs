@@ -1,3 +1,4 @@
+mod cells;
 mod cli;
 mod diff;
 mod error;
@@ -24,6 +25,7 @@ fn main() {
         cli::Command::Run(args) => run::run(&args),
         cli::Command::Diff(args) => diff::run_diff(&args),
         cli::Command::Load(args) => load::run_load(&args),
+        cli::Command::Index(args) => cells::run_index(&args),
     };
     if let Err(err) = result {
         eprintln!("kiln: {err}");

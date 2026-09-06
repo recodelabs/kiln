@@ -37,6 +37,27 @@ pub enum Command {
     Diff(DiffArgs),
     /// Send changed resources to a FHIR server as version-checked transaction bundles
     Load(LoadArgs),
+    /// Backfill spatial-index cells (quadkey, geohash) onto snapshot Locations that lack them; writes the changed resources as FHIR NDJSON for `kiln load` (offline)
+    Index(IndexArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct IndexArgs {
+    /// Snapshot directory containing locations.ndjson
+    #[arg(long)]
+    pub snapshot: PathBuf,
+    /// SCHEME:LEVEL to ensure on every positioned Location, repeatable (e.g. quadkey:18, geohash:8)
+    #[arg(long = "spatial-index", required = true)]
+    pub spatial_index: Vec<String>,
+    /// Recompute cells at the requested levels even where one is present
+    #[arg(long)]
+    pub refresh: bool,
+    /// Output NDJSON file of changed resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone)]

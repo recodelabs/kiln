@@ -495,3 +495,44 @@ fn without_an_organizations_file_diff_is_location_only() {
     assert_eq!(got.len(), 1);
     assert_eq!(got[0]["resourceType"], "Location");
 }
+
+#[test]
+fn a_position_edit_recomputes_the_spatial_index_cells() {
+    const SPATIAL_EXT: &str = "https://icr.healthcampaigns.org/StructureDefinition/spatial-index";
+    let dir = tempfile::tempdir().unwrap();
+    let snap = dir.path().join("snapshot");
+    std::fs::create_dir_all(&snap).unwrap();
+    // The clinic at (3.25, 6.25) with a stale-looking but well-formed zoom-18 cell.
+    let mut clinic = clinic();
+    clinic["extension"] = json!([{"url": SPATIAL_EXT, "extension": [
+        {"url": "system", "valueCode": "quadkey"},
+        {"url": "level", "valueUnsignedInt": 18},
+        {"url": "cell", "valueString": "122222222222222222"}]}]);
+    std::fs::write(snap.join("locations.ndjson"), format!("{}\n{}\n", ng(), clinic)).unwrap();
+
+    // Move the clinic north-east; the cell must follow the point.
+    let edits = collection(vec![feature(
+        json!({"id": "clinic", "name": "Gama Clinic", "status": "active", "type": "facility",
+               "part_of": "ng", "version_id": "2",
+               "position_longitude": 3.4, "position_latitude": 6.5}),
+        point(3.4, 6.5),
+    )]);
+    let input = write_input(dir.path(), "moved.geojson", &edits);
+    let out = dir.path().join("changes.ndjson");
+    diff(&snap, &input, &out).success();
+    let (moved,) = match changes(&out).as_slice() {
+        [one] => (one.clone(),),
+        other => panic!("expected one change, got {}", other.len()),
+    };
+    assert_eq!(moved["position"]["longitude"], 3.4);
+    let ext = moved["extension"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["url"] == SPATIAL_EXT)
+        .expect("cell kept");
+    let cell = ext["extension"][2]["valueString"].as_str().unwrap();
+    assert_ne!(cell, "122222222222222222", "recomputed for the new point");
+    assert_eq!(cell.len(), 18);
+    assert!(cell.starts_with('1'), "lon > 0, lat > 0 is quadrant 1 at zoom 1: {cell}");
+}

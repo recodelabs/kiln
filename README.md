@@ -186,6 +186,8 @@ kiln inspect   --out DIR
 kiln diff      --snapshot DIR --in EDITS --out CHANGES.ndjson [--report FILE]
 kiln load      --server URL [--token T] --in CHANGES.ndjson
                [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
+kiln index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
+               --out CHANGES.ndjson [--refresh] [--report FILE]
 ```
 
 `--token` falls back to `$KILN_TOKEN` and is sent as a bearer token; getting
@@ -392,6 +394,7 @@ whether an edit to the column will flow back to FHIR.
 | `geometry` | the boundary attachment extension, as a polygon; or the position, as a point |
 | `pcode`, `gers_id` | promoted from `identifier` by system, for convenience; `pcode` comes from the ICR pcode system, or failing that the `national-admin-code` system |
 | `settlement_type`, `delivery_strategy`, `facility_level`, `ownership` | the ICR profile extensions |
+| `quadkey`, `quadkey_level` | the deepest quadkey spatial-index cell on the Location and its zoom; every prefix is the containing tile at a coarser zoom. Derived from `position` by kiln; read-only in the round trip |
 | `nhfr_code`, `nhfr_uid` | promoted from the paired Organization's `identifier` by system |
 | `organization_identifier` | the paired Organization's `identifier`, list of struct `{system, value}` |
 | `facility_level_text`, `ownership_text` | the `text` of the paired Organization's `type` concepts holding those codings |
@@ -624,6 +627,38 @@ writable column holding a value of the wrong type, ignored for that row),
 `geometry_unparseable`, `geometry_kind_changed`, `geometry_invalid`,
 `position_geometry_disagree`, `boundary_z_dropped`,
 `organization_missing` and `snapshot_line_unparsed`.
+
+### index
+
+```
+kiln index --snapshot DIR --spatial-index quadkey:18 --out changes.ndjson [--refresh] [--report FILE]
+```
+
+The ICR IG lets a point Location carry the **spatial index cell** it falls
+in — the `spatial-index` extension: scheme (`quadkey`, `h3`, `geohash`),
+level (quadkey zoom, H3 resolution, geohash precision) and the cell key —
+so that de-duplication, tile-level joins and containment queries
+(`Location?quadkey=0313131` is every point inside that tile, because FHIR
+string search is prefix matching and quadkeys are prefix-hierarchical)
+need no geometry engine. The cell is a pure function of the position, so
+kiln owns it: `bake-points --spatial-index quadkey:18` writes it at import,
+and `index` backfills it onto Locations that were loaded without one.
+
+`index` reads the snapshot, and for every Location that has a position but
+lacks a cell at one of the requested scheme/level pairs, writes the resource
+with the cell(s) added to the output NDJSON — `meta.versionId` and everything
+else untouched, so `kiln load` sends it as the same version-checked `PUT` a
+`diff` edit would be. Locations without a position and Locations that already
+carry every requested cell are counted and skipped. `--refresh` recomputes
+the requested cells even where present (after a bug, or a scheme change).
+Re-running after a load and a fresh extract writes nothing.
+
+`diff` keeps the cells honest on the way back: when an edit moves a
+Location's position, every quadkey and geohash cell already on it is
+recomputed for the new point (an H3 cell, which kiln cannot compute, is
+dropped rather than left wrong), and clearing the position removes them all.
+Quadkey and geohash are computed in kiln with no dependency; H3 cells are
+parsed and carried but not computed yet.
 
 ### load
 
