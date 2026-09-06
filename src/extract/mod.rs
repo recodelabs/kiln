@@ -13,10 +13,10 @@ use crate::error::{KilnError, Result};
 use crate::extract::boundary::{fetch_boundaries, FetchOptions};
 use crate::extract::cache::Cache;
 use crate::extract::client::FhirClient;
-use crate::extract::page::page_locations;
+use crate::extract::page::{page_locations, page_resources};
 use crate::report::Report;
 use crate::snapshot::instant::{format_utc, parse_instant};
-use crate::snapshot::merge::merge;
+use crate::snapshot::merge::{merge, merge_file, MergeFiles};
 use crate::snapshot::{same_server, Snapshot, State};
 use crate::transform::write_report;
 
@@ -92,19 +92,37 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
         }
     );
 
-    let result = run_phases(args, &snap, since.as_deref());
+    // Organizations have their own watermark. A snapshot from before they
+    // were extracted has no file and no watermark, so they are fetched in
+    // full while Locations stay incremental.
+    let org_since: Option<String> = if args.full {
+        None
+    } else if let Some(s) = &args.since {
+        Some(s.clone())
+    } else if snap.organizations().exists() {
+        state.as_ref().and_then(|st| st.organization_watermark.clone())
+    } else {
+        None
+    };
+    let result = run_phases(args, &snap, since.as_deref(), org_since.as_deref());
     if result.is_err() {
-        // The incoming file describes a run that never finished. The next
-        // run truncates it before paging, so keeping it buys nothing and
-        // it would only mislead anyone inspecting the snapshot directory.
+        // The incoming files describe a run that never finished. The next
+        // run truncates them before paging, so keeping them buys nothing and
+        // they would only mislead anyone inspecting the snapshot directory.
         let _ = std::fs::remove_file(snap.incoming());
+        let _ = std::fs::remove_file(snap.incoming_organizations());
     }
     result
 }
 
 /// The three phases. Split out so `run_extract` can clean up the incoming
 /// file on any failure between creating it and the merge that consumes it.
-fn run_phases(args: &ExtractArgs, snap: &Snapshot, since: Option<&str>) -> Result<()> {
+fn run_phases(
+    args: &ExtractArgs,
+    snap: &Snapshot,
+    since: Option<&str>,
+    org_since: Option<&str>,
+) -> Result<()> {
     let full = since.is_none();
     let client = FhirClient::new(
         args.token.clone(),
@@ -192,12 +210,37 @@ fn run_phases(args: &ExtractArgs, snap: &Snapshot, since: Option<&str>) -> Resul
         }
     }
 
+    // Organizations: page and merge, no boundary phase. This runs after the
+    // Location merge so a failure here still leaves a consistent Location
+    // snapshot behind, with the state file untouched until both succeed.
+    let org_paged = page_resources(
+        &client,
+        &args.server,
+        "Organization",
+        org_since,
+        &snap.incoming_organizations(),
+        &mut report,
+    )?;
+    eprintln!(
+        "paged {} organizations over {} page(s)",
+        org_paged.notes.len(),
+        org_paged.pages
+    );
+    let org_stats = merge_file(
+        &MergeFiles::organizations(snap),
+        &org_paged.notes,
+        org_since.is_none(),
+        &|_| None,
+        &HashMap::new(),
+        &mut report,
+    )?;
+
     let new_state = State {
         server: args.server.trim_end_matches('/').to_string(),
         watermark: stats.watermark.clone(),
         count: stats.total,
-        organization_watermark: None,
-        organization_count: None,
+        organization_watermark: org_stats.watermark.clone(),
+        organization_count: Some(org_stats.total),
         kiln_version: env!("CARGO_PKG_VERSION").to_string(),
         completed_at: format_utc(std::time::SystemTime::now()),
     };
@@ -216,6 +259,13 @@ fn run_phases(args: &ExtractArgs, snap: &Snapshot, since: Option<&str>) -> Resul
         stats.added,
         stats.updated,
         stats.watermark.as_deref().unwrap_or("none"),
+    );
+    println!(
+        "organizations: {} resources, {} new, {} updated, watermark {}",
+        org_stats.total,
+        org_stats.added,
+        org_stats.updated,
+        org_stats.watermark.as_deref().unwrap_or("none"),
     );
     println!("{}", report.summary());
     Ok(())

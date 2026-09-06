@@ -676,7 +676,7 @@ fn org_lines(snapshot: &Path) -> Vec<Value> {
 }
 ```
 
-Add `expect_no_organizations(&server);` as the first line after every `let server = Server::run();` in the existing tests (there are about twenty; `grep -n 'Server::run()' tests/extract.rs` lists them; the `run_*` tests included).
+Add `expect_no_organizations(&server);` as the first line after every `let server = Server::run();` in the existing tests (there are about twenty; `grep -n 'Server::run()' tests/extract.rs` lists them; the `run_*` tests included). Two tests name their servers differently: `server_mismatch_is_a_usage_error_and_full_repoints` (`a`, `b`) and `circuit_breaker_aborts_and_keeps_the_old_snapshot` (`good`, `bad`); call the helper on each of those too.
 
 Append two tests:
 
