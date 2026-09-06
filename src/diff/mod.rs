@@ -71,17 +71,16 @@ pub fn index_snapshot(path: &Path, report: &mut Report) -> Result<HashMap<String
             .ok()
             .and_then(|v| v.get("id")?.as_str().map(str::to_string));
         match id {
-            Some(id) => {
-                if index.contains_key(&id) {
-                    report.add(
-                        "duplicate_id",
-                        &id,
-                        &format!("snapshot line {} repeats an earlier id; first kept", line.number),
-                    );
-                } else {
-                    index.insert(id, (line.offset, line.len));
+            Some(id) => match index.entry(id) {
+                std::collections::hash_map::Entry::Occupied(e) => report.add(
+                    "duplicate_id",
+                    e.key(),
+                    &format!("snapshot line {} repeats an earlier id; first kept", line.number),
+                ),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((line.offset, line.len));
                 }
-            }
+            },
             None => report.add(
                 "snapshot_line_unparsed",
                 "<unknown>",
