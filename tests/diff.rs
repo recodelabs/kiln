@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 const BOUNDARY_EXT: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson";
 const PCODE: &str = "https://icr.healthcampaigns.org/identifiers/pcode";
+const NHFR_CODE: &str = "https://icr.healthcampaigns.org/identifiers/nga-nhfr-code";
+const FACILITY_TYPE: &str = "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs";
 const SQUARE: &str = r#"{"type":"Polygon","coordinates":[[[3,6],[9,6],[9,12],[3,12],[3,6]]]}"#;
 
 fn b64(s: &str) -> String {
@@ -43,7 +45,20 @@ fn clinic() -> Value {
         "name": "Gama Clinic", "status": "active",
         "type": [{"coding": [{"code": "facility"}]}],
         "partOf": {"reference": "Location/ng"},
+        "managingOrganization": {"reference": "Organization/org-clinic"},
         "position": {"longitude": 3.25, "latitude": 6.25}
+    })
+}
+
+fn org_clinic() -> Value {
+    json!({
+        "resourceType": "Organization", "id": "org-clinic", "active": true, "name": "Gama Clinic",
+        "meta": {"versionId": "9"},
+        "identifier": [{"system": NHFR_CODE, "value": "05/08/1"}],
+        "type": [
+            {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/organization-type", "code": "prov"}]},
+            {"coding": [{"system": FACILITY_TYPE, "code": "primary"}], "text": "Health Post"}
+        ]
     })
 }
 
@@ -52,6 +67,7 @@ fn snapshot(dir: &Path) -> PathBuf {
     let snap = dir.join("snapshot");
     std::fs::create_dir_all(&snap).unwrap();
     std::fs::write(snap.join("locations.ndjson"), format!("{}\n{}\n", ng(), clinic())).unwrap();
+    std::fs::write(snap.join("organizations.ndjson"), format!("{}\n", org_clinic())).unwrap();
     snap
 }
 
@@ -85,7 +101,10 @@ fn export() -> Vec<Value> {
         feature(
             json!({"id": "clinic", "name": "Gama Clinic", "status": "active", "type": "facility",
                    "part_of": "ng", "admin0_name": "Nigeria", "tier": "site", "version_id": "2",
-                   "position_longitude": 3.25, "position_latitude": 6.25}),
+                   "position_longitude": 3.25, "position_latitude": 6.25,
+                   "nhfr_code": "05/08/1", "nhfr_uid": null, "facility_level": null,
+                   "facility_level_text": "Health Post", "ownership_text": null,
+                   "organization_identifier": "[{\"system\":\"https://icr.healthcampaigns.org/identifiers/nga-nhfr-code\",\"value\":\"05/08/1\"}]"}),
             point(3.250000001, 6.25),
         ),
     ]
@@ -149,9 +168,14 @@ fn a_rename_emits_one_complete_resource_with_its_version() {
     let out = dir.path().join("changes.ndjson");
     let a = diff(&snap, &input, &out).success();
     assert!(stdout(&a).contains("1 changed, 1 unchanged, 0 new"), "{}", stdout(&a));
+    assert!(stdout(&a).contains("Location: 1, Organization: 1"), "{}", stdout(&a));
     let got = changes(&out);
-    assert_eq!(got.len(), 1);
-    let r = &got[0];
+    assert_eq!(got.len(), 2, "the Organization first, then the Location");
+    assert_eq!(got[0]["resourceType"], "Organization");
+    assert_eq!(got[0]["id"], "org-clinic");
+    assert_eq!(got[0]["name"], "Gama PHC");
+    assert_eq!(got[0]["meta"]["versionId"], "9");
+    let r = &got[1];
     assert_eq!(r["id"], "clinic");
     assert_eq!(r["name"], "Gama PHC");
     assert_eq!(r["meta"]["versionId"], "2");
@@ -321,16 +345,21 @@ fn new_rows_become_creates_with_and_without_an_id() {
     let a = diff(&snap, &input, &out).success();
     assert!(stdout(&a).contains("0 changed, 0 unchanged, 2 new"), "{}", stdout(&a));
     let got = changes(&out);
-    assert_eq!(got.len(), 2);
-    assert_eq!(got[0]["id"], "newsite");
-    assert_eq!(got[0]["resourceType"], "Location");
-    assert!(got[0].get("meta").is_none());
-    assert_eq!(got[0]["partOf"]["reference"], "Location/ng");
-    assert_eq!(got[0]["type"], json!([{"coding": [{"code": "facility"}]}]));
-    assert_eq!(got[0]["position"], json!({"longitude": 4.0, "latitude": 7.0}));
-    let generated = got[1]["id"].as_str().unwrap();
+    assert_eq!(got.len(), 3, "a facility creates its Organization pair");
+    assert_eq!(got[0]["resourceType"], "Organization");
+    assert_eq!(got[0]["id"], "org-newsite");
+    assert_eq!(got[0]["active"], true);
+    assert_eq!(got[0]["name"], "New Site");
+    assert_eq!(got[1]["id"], "newsite");
+    assert_eq!(got[1]["resourceType"], "Location");
+    assert!(got[1].get("meta").is_none());
+    assert_eq!(got[1]["partOf"]["reference"], "Location/ng");
+    assert_eq!(got[1]["managingOrganization"]["reference"], "Organization/org-newsite");
+    assert_eq!(got[1]["type"], json!([{"coding": [{"code": "facility"}]}]));
+    assert_eq!(got[1]["position"], json!({"longitude": 4.0, "latitude": 7.0}));
+    let generated = got[2]["id"].as_str().unwrap();
     assert_eq!(generated.len(), 36, "a UUID: {generated}");
-    assert_eq!(got[1]["identifier"], json!([{"system": PCODE, "value": "NG9"}]));
+    assert_eq!(got[2]["identifier"], json!([{"system": PCODE, "value": "NG9"}]));
     let counts = &report(&out)["counts"];
     assert_eq!(counts["new_location"], 1);
     assert_eq!(counts["new_location_generated_id"], 1);
@@ -349,8 +378,9 @@ fn duplicate_input_rows_are_reported_and_skipped() {
     let out = dir.path().join("changes.ndjson");
     diff(&snap, &input, &out).success();
     let got = changes(&out);
-    assert_eq!(got.len(), 1);
-    assert_eq!(got[0]["name"], "First");
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[1]["resourceType"], "Location");
+    assert_eq!(got[1]["name"], "First");
     assert_eq!(report(&out)["counts"]["duplicate_id"], 1);
 }
 
@@ -400,4 +430,68 @@ fn geoparquet_written_by_transform_round_trips_unchanged() {
         assert!(stdout(&a).contains("0 changed, 1 unchanged, 0 new"), "{}: {}", file.display(), stdout(&a));
         assert_eq!(report(&out)["counts"], json!({}), "{}", file.display());
     }
+}
+
+#[test]
+fn nhfr_code_edits_touch_the_organization_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot(dir.path());
+    let mut rows = export();
+    rows[1]["properties"]["nhfr_code"] = json!("05/08/2");
+    rows[1]["properties"]["facility_level_text"] = json!("Clinic");
+    let input = write_input(dir.path(), "edits.geojson", &collection(rows));
+    let out = dir.path().join("changes.ndjson");
+    let a = diff(&snap, &input, &out).success();
+    assert!(stdout(&a).contains("Location: 0, Organization: 1"), "{}", stdout(&a));
+    let got = changes(&out);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0]["resourceType"], "Organization");
+    assert_eq!(got[0]["identifier"][0]["value"], "05/08/2");
+    assert_eq!(got[0]["type"][1]["text"], "Clinic");
+    assert_eq!(got[0]["type"][1]["coding"][0]["code"], "primary", "an unedited facility_level never reaches the Organization");
+}
+
+#[test]
+fn retiring_a_facility_deactivates_its_organization() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot(dir.path());
+    let mut rows = export();
+    rows[1]["properties"]["status"] = json!("inactive");
+    let input = write_input(dir.path(), "edits.geojson", &collection(rows));
+    let out = dir.path().join("changes.ndjson");
+    diff(&snap, &input, &out).success();
+    let got = changes(&out);
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0]["active"], false);
+    assert_eq!(got[1]["status"], "inactive");
+}
+
+#[test]
+fn a_new_settlement_row_stays_a_single_resource() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot(dir.path());
+    let rows = vec![feature(json!({"id": "village", "name": "Village", "type": "settlement", "part_of": "ng"}), point(4.0, 7.0))];
+    let input = write_input(dir.path(), "edits.geojson", &collection(rows));
+    let out = dir.path().join("changes.ndjson");
+    diff(&snap, &input, &out).success();
+    let got = changes(&out);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0]["resourceType"], "Location");
+    assert!(got[0].get("managingOrganization").is_none());
+}
+
+#[test]
+fn without_an_organizations_file_diff_is_location_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap = snapshot(dir.path());
+    std::fs::remove_file(snap.join("organizations.ndjson")).unwrap();
+    let mut rows = export();
+    rows[1]["properties"]["name"] = json!("Gama PHC");
+    let input = write_input(dir.path(), "edits.geojson", &collection(rows));
+    let out = dir.path().join("changes.ndjson");
+    let a = diff(&snap, &input, &out).success();
+    assert!(String::from_utf8_lossy(&a.get_output().stderr).contains("no organizations.ndjson"));
+    let got = changes(&out);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0]["resourceType"], "Location");
 }
