@@ -78,7 +78,7 @@ pub struct Location {
     pub fhir_json: String,
 }
 
-fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn str_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     obj.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
@@ -134,7 +134,7 @@ fn first_coding_code(node: Option<&Value>) -> Option<String> {
 }
 
 /// First coding under `system` across a CodeableConcept or list of them.
-fn coding_code_by_system(node: Option<&Value>, system: &str) -> Option<String> {
+pub(crate) fn coding_code_by_system(node: Option<&Value>, system: &str) -> Option<String> {
     let concepts: Vec<&Value> = match node? {
         Value::Array(items) => items.iter().collect(),
         other => vec![other],
