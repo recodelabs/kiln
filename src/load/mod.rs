@@ -150,7 +150,15 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
             )))
         }
     };
-    check_update_create(&capability, &creates)?;
+    let unstated = check_update_create(&capability, &creates)?;
+    if !unstated.is_empty() {
+        eprintln!(
+            "kiln: warning: the server's CapabilityStatement does not state updateCreate for {}; \
+             proceeding on the assumption that PUT to a new id creates (HAPI FHIR supports it but omits the flag). \
+             If the server does not, the first bundle that creates will fail with the server's own error.",
+            unstated.join(", ")
+        );
+    }
 
     if args.dry_run {
         println!(

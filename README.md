@@ -627,9 +627,14 @@ Load reads any NDJSON of FHIR resources with a `resourceType` and an `id`,
 orders them parents first by `partOf`, groups them into transaction bundles
 of `PUT <Type>/<id>`, and posts them with retry and backoff. Before the
 first bundle it fetches the server's capability statement, which also
-proves the URL and token work; if the input creates any new resource, the
-server must advertise update-as-create for that type, because `PUT` to a
-new id needs it and one clear error beats hundreds of identical 404s.
+proves the URL and token work. If the input creates any new resource, the
+server must support update-as-create for that type, because `PUT` to a new
+id needs it. A server that advertises `updateCreate: false` for a needed
+type is refused up front, since one clear error beats hundreds of identical
+404s. A server that does not state the flag at all (the element is optional,
+and HAPI FHIR omits it while supporting update-as-create) gets a warning and
+the load proceeds; if it really cannot create on `PUT`, the first creating
+bundle fails with the server's own error.
 
 Every entry whose resource carries a `meta.versionId` is sent with
 `ifMatch` set to that version. If the resource was changed on the server
