@@ -22,6 +22,11 @@ pub const SETTLEMENT_TYPE_EXTENSION_URL: &str =
 pub const DELIVERY_STRATEGY_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/delivery-strategy";
 pub const PCODE_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/pcode";
+pub const NATIONAL_ADMIN_CODE_SYSTEM: &str =
+    "https://icr.healthcampaigns.org/identifiers/national-admin-code";
+/// Identifier systems that carry the administrative code promoted to the
+/// `pcode` column and used for the country, in order of preference.
+pub const PCODE_SYSTEMS: [&str; 2] = [PCODE_SYSTEM, NATIONAL_ADMIN_CODE_SYSTEM];
 pub const GERS_SYSTEM: &str = "https://icr.healthcampaigns.org/identifiers/overture-gers";
 pub const FACILITY_TYPE_SYSTEM: &str =
     "https://icr.healthcampaigns.org/CodeSystem/icr-facility-type-cs";
@@ -294,11 +299,12 @@ impl Location {
             }
             Some(_) => report.add("malformed_field", &id, "identifier is not a list"),
         }
-        loc.pcode = loc
-            .identifier
-            .iter()
-            .find(|i| i.system.as_deref() == Some(PCODE_SYSTEM))
-            .and_then(|i| i.value.clone());
+        loc.pcode = PCODE_SYSTEMS.iter().find_map(|system| {
+            loc.identifier
+                .iter()
+                .find(|i| i.system.as_deref() == Some(*system))
+                .and_then(|i| i.value.clone())
+        });
         loc.gers_id = loc
             .identifier
             .iter()
@@ -439,6 +445,28 @@ mod tests {
         assert_eq!(loc.overlays_admin_unit_ids, vec!["kano"]);
         assert!(loc.boundary.is_none());
         assert_eq!(report.counts().len(), 0);
+    }
+
+    #[test]
+    fn pcode_falls_back_to_the_national_admin_code_system() {
+        let mut report = Report::default();
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"nga","identifier":[
+            {"system":"https://icr.healthcampaigns.org/identifiers/national-admin-code","value":"NGA"}]}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(loc.pcode.as_deref(), Some("NGA"));
+
+        // Both present: the pcode system wins whatever the order.
+        let loc = parse_str(
+            r#"{"resourceType":"Location","id":"x","identifier":[
+            {"system":"https://icr.healthcampaigns.org/identifiers/national-admin-code","value":"NAC"},
+            {"system":"https://icr.healthcampaigns.org/identifiers/pcode","value":"PC"}]}"#,
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(loc.pcode.as_deref(), Some("PC"));
     }
 
     #[test]

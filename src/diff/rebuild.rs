@@ -11,7 +11,7 @@ use crate::diff::input::{ColumnValue, Identifier, InputRow, IDENTIFIER_COLUMN};
 use crate::fhir::location::{
     BOUNDARY_EXTENSION_URL, BOUNDARY_EXTENSION_URLS, DELIVERY_STRATEGY_EXTENSION_URL,
     FACILITY_TYPE_SYSTEM, GEOJSON_CONTENT_TYPE, GERS_SYSTEM, OWNERSHIP_SYSTEM, PCODE_SYSTEM,
-    SETTLEMENT_TYPE_EXTENSION_URL,
+    PCODE_SYSTEMS, SETTLEMENT_TYPE_EXTENSION_URL,
 };
 use crate::fhir::{Boundary, Location};
 use crate::geometry::{kind_name, parse_boundary, validity};
@@ -63,7 +63,10 @@ fn apply_column(obj: &mut Object, name: &str, value: &ColumnValue) {
         "physical_type" => set_physical_type(obj, t),
         "part_of" => set_reference(obj, "partOf", "Location", t),
         "managing_organization" => set_reference(obj, "managingOrganization", "Organization", t),
-        "pcode" => upsert_identifier(obj, PCODE_SYSTEM, t),
+        "pcode" => {
+            let system = pcode_system_of(obj);
+            upsert_identifier(obj, system, t)
+        }
         "gers_id" => upsert_identifier(obj, GERS_SYSTEM, t),
         "settlement_type" => upsert_extension_code(obj, SETTLEMENT_TYPE_EXTENSION_URL, t),
         "delivery_strategy" => upsert_extension_code(obj, DELIVERY_STRATEGY_EXTENSION_URL, t),
@@ -186,6 +189,17 @@ fn set_reference(obj: &mut Object, key: &str, default_type: &str, id: Option<&st
         None => format!("{default_type}/{id}"),
     };
     object_mut(obj, key).insert("reference".into(), Value::String(reference));
+}
+
+/// The identifier system the row's `pcode` was promoted from, so an edit
+/// goes back to the same entry; the pcode system when there is none yet.
+fn pcode_system_of(obj: &Object) -> &'static str {
+    let list = obj.get("identifier").and_then(Value::as_array);
+    PCODE_SYSTEMS
+        .iter()
+        .copied()
+        .find(|system| list.is_some_and(|l| l.iter().any(|i| system_is(i, system))))
+        .unwrap_or(PCODE_SYSTEM)
 }
 
 fn system_is(entry: &Value, system: &str) -> bool {
@@ -532,6 +546,16 @@ mod tests {
         let out = apply(base, &[("pcode", ColumnValue::Null), ("gers_id", text("g"))]);
         assert_eq!(out["identifier"], json!([{"system":GERS_SYSTEM,"value":"g"}]));
         let out = apply(json!({"resourceType":"Location","id":"a"}), &[("gers_id", ColumnValue::Null)]);
+        assert!(out.get("identifier").is_none());
+    }
+
+    #[test]
+    fn pcode_writes_back_to_the_national_admin_code_entry_when_that_is_what_the_row_has() {
+        let nac = "https://icr.healthcampaigns.org/identifiers/national-admin-code";
+        let base = json!({"resourceType":"Location","id":"nga","identifier":[{"system":nac,"value":"NGA"}]});
+        let out = apply(base.clone(), &[("pcode", text("NG"))]);
+        assert_eq!(out["identifier"], json!([{"system":nac,"value":"NG"}]));
+        let out = apply(base, &[("pcode", ColumnValue::Null)]);
         assert!(out.get("identifier").is_none());
     }
 
