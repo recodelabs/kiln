@@ -1,7 +1,7 @@
 # kiln extract and the snapshot — design (plan 2 of the Rust rewrite)
 
 **Date:** 2026-09-05
-**Status:** Approved design, ready for planning
+**Status:** Implemented on branch `rust-extract` (plan `docs/superpowers/plans/2026-09-05-rust-extract-snapshot.md`). Amendments made during execution, in the plan and the README: `--timeout` (default 300 s, replacing the fixed 60 s below); a [0.5, 1.0) jitter factor on computed backoff; a fifth report kind `boundary_stale_from_cache`; `--full` with `--since` is a usage error; `.incoming.ndjson` is removed on failure; a search response whose `resourceType` is not `Bundle` is an environment error.
 **Builds on:** README.md (the overall design), plan 1 (`transform`, `inspect`, merged via PR #8)
 
 ## Problem

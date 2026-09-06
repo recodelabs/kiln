@@ -179,7 +179,7 @@ All commands are subcommands of one binary.
 ```
 kiln extract   --server URL [--token T] --snapshot DIR
                [--full] [--since INSTANT] [--timeout SECS]
-               [--concurrency N] [--retries N] [--max-consecutive-failures N]
+               [--concurrency 8] [--retries 3] [--max-consecutive-failures 50]
                [--no-cache] [--refresh] [--cache-dir DIR]
 kiln transform --snapshot DIR --out DIR [--country CC] [--row-group-size N] [--partition-by KEYS]
 kiln run       <extract flags> <transform flags>
@@ -263,6 +263,10 @@ hour to trip it, because each attempt cycle runs the full timeout; lower
 `--timeout` or the threshold for a fast failure. A scattering of dead URLs
 in an otherwise healthy registry never trips it, because one success resets
 the count.
+
+A search response that is not a Bundle, for example an OperationOutcome or a
+gateway's index page returned with status 200, aborts the run rather than
+being read as an empty registry.
 
 `_extract_report.json` has the same shape as transform's report and adds
 these kinds: `page_resource_skipped` (a bundle entry with no resource object
