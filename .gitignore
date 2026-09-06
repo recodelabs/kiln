@@ -9,3 +9,5 @@ out/
 /*.ndjson
 /.worktrees
 /target
+/data
+.DS_Store
