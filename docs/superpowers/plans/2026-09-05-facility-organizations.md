@@ -998,6 +998,7 @@ fn organization(id: &str, name: &str) -> String {
 /// Reads one string column of the facility partition into `id -> value`.
 fn column(out: &Path, name: &str) -> std::collections::HashMap<String, Option<String>> {
     use arrow_array::cast::AsArray;
+    use arrow_array::Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let file = std::fs::File::open(out.join("locations/country=NG/geom_type=point/type=facility/part-0.parquet")).unwrap();
     let reader = ParquetRecordBatchReaderBuilder::try_new(file).unwrap().build().unwrap();

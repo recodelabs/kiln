@@ -7,6 +7,7 @@ use crate::error::{KilnError, Result};
 use crate::index::build_index;
 use crate::index::partition::parse_keys;
 use crate::report::Report;
+use crate::snapshot::ORGANIZATIONS_FILE;
 use crate::write::dataset::write_dataset;
 
 pub const SNAPSHOT_FILE: &str = "locations.ndjson";
@@ -54,7 +55,16 @@ pub fn run_transform(args: &TransformArgs) -> Result<()> {
         Err(e) => return Err(KilnError::io(&report_path, e)),
     }
 
-    let written = write_dataset(&ndjson, &mut index, &args.out, &keys, args.row_group_size)?;
+    let organizations = args.snapshot.join(ORGANIZATIONS_FILE);
+    let organizations = organizations.is_file().then_some(organizations.as_path());
+    let written = write_dataset(
+        &ndjson,
+        &mut index,
+        &args.out,
+        &keys,
+        args.row_group_size,
+        organizations,
+    )?;
 
     write_report(&report_path, &index.report)?;
     let rows: usize = written.iter().map(|w| w.rows).sum();
