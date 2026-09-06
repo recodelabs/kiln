@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 arrow-array = "59"
 arrow-schema = "59"
-parquet = { version = "59", default-features = false, features = ["arrow", "zstd", "geospatial"] }
+parquet = { version = "59", default-features = false, features = ["arrow", "zstd", "snap", "lz4", "geospatial"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

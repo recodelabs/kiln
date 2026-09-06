@@ -272,6 +272,30 @@ mod tests {
         assert_eq!(report.count("geometry_unparseable"), 1);
     }
 
+    /// QGIS, GDAL and DuckDB write Snappy by default; the parquet crate only
+    /// decodes codecs enabled at build time, so this guards the feature list.
+    #[test]
+    fn snappy_and_lz4_compressed_input_is_readable() {
+        use parquet::basic::Compression;
+        let dir = tempfile::tempdir().unwrap();
+        for (name, compression) in [("snappy", Compression::SNAPPY), ("lz4", Compression::LZ4_RAW)] {
+            let path = dir.path().join(format!("{name}.parquet"));
+            let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(vec![Some("a")]))]).unwrap();
+            let props = WriterProperties::builder().set_compression(compression).build();
+            let mut w = ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, Some(props)).unwrap();
+            w.write(&batch).unwrap();
+            w.close().unwrap();
+            let mut ids = Vec::new();
+            read_geoparquet(&path, &mut Report::default(), |row, _| {
+                ids.push(row.id.unwrap());
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(ids, vec!["a"]);
+        }
+    }
+
     #[test]
     fn a_file_without_geo_metadata_falls_back_to_a_geometry_column_or_none() {
         let schema = Schema::new(vec![Field::new("geometry", DataType::Binary, true)]);
