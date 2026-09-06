@@ -28,6 +28,11 @@ pub struct PageNote {
 pub struct PageResult {
     pub notes: Vec<PageNote>,
     pub pages: usize,
+    /// The last page held a full `PAGE_SIZE` of entries and the server gave
+    /// no next link. A result set that ends on a full page is possible but
+    /// rare; a server that stops paging early looks exactly like this, so
+    /// the caller cross-checks the count when it sees it.
+    pub last_page_full: bool,
 }
 
 pub fn next_link(bundle: &Value) -> Option<String> {
@@ -109,6 +114,7 @@ pub fn page_resources(
     let mut seen: HashSet<String> = HashSet::new();
     let mut notes = Vec::new();
     let mut pages = 0usize;
+    let mut last_page_len = 0usize;
 
     loop {
         let current = url.to_string();
@@ -136,13 +142,9 @@ pub fn page_resources(
                 )));
             }
         }
-        for (i, entry) in bundle
-            .get("entry")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
+        let entries = bundle.get("entry").and_then(Value::as_array);
+        last_page_len = entries.map_or(0, Vec::len);
+        for (i, entry) in entries.into_iter().flatten().enumerate() {
             let Some(resource) = entry.get("resource").filter(|r| r.is_object()) else {
                 report.add(
                     "page_resource_skipped",
@@ -190,7 +192,11 @@ pub fn page_resources(
         }
     }
     out.flush().map_err(|e| KilnError::io(incoming, e))?;
-    Ok(PageResult { notes, pages })
+    Ok(PageResult {
+        notes,
+        pages,
+        last_page_full: last_page_len >= PAGE_SIZE,
+    })
 }
 
 /// The server's total for `resource_type`, or `None` when it will not say.

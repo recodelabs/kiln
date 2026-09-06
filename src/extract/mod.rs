@@ -235,27 +235,37 @@ fn run_phases(
         &mut report,
     )?;
 
-    // Deletions are invisible to an incremental search: a deleted resource
-    // appears in no result. Compare the server's count with the merged
-    // snapshot's so a drifted snapshot is at least reported. A full run
-    // matches by construction and skips the request.
-    for (resource_type, snapshot_total, incremental) in [
-        ("Location", stats.total, !full),
-        ("Organization", org_stats.total, org_since.is_some()),
+    // Compare the server's count with the merged snapshot's. Incremental
+    // runs always: deletions are invisible to a `_lastUpdated` search, so a
+    // drifted snapshot is at least reported. Full runs match by construction
+    // unless the server stopped issuing next links before the end of the
+    // result set, which looks like a final page that is exactly full (HAPI
+    // FHIR 8.12 with its stock prefetch thresholds went quiet after 3,000 of
+    // 51,843 Locations, 2026-09-06); only then is the count worth a request.
+    for (resource_type, snapshot_total, incremental, suspicious) in [
+        ("Location", stats.total, !full, paged.last_page_full),
+        ("Organization", org_stats.total, org_since.is_some(), org_paged.last_page_full),
     ] {
-        if !incremental {
+        if !incremental && !suspicious {
             continue;
         }
         match count_resources(&client, &args.server, resource_type) {
-            Some(server_total) if server_total as usize != snapshot_total => report.add(
-                "count_mismatch",
-                resource_type,
-                &format!(
-                    "the server has {server_total} {resource_type} resources but the snapshot has {snapshot_total}; \
-                     resources were probably deleted on the server, which an incremental extract cannot see. \
-                     Run kiln extract --full to resynchronise."
-                ),
-            ),
+            Some(server_total) if server_total as usize != snapshot_total => {
+                let detail = if incremental {
+                    format!(
+                        "the server has {server_total} {resource_type} resources but the snapshot has {snapshot_total}; \
+                         resources were probably deleted on the server, which an incremental extract cannot see. \
+                         Run kiln extract --full to resynchronise."
+                    )
+                } else {
+                    format!(
+                        "the server reports {server_total} {resource_type} resources but the full extract paged {snapshot_total}; \
+                         the server stopped paging early (no next link) or its count is stale. \
+                         The snapshot is incomplete: check the server's paging limits before using it."
+                    )
+                };
+                report.add("count_mismatch", resource_type, &detail)
+            }
             Some(_) => {}
             None => eprintln!("count check unavailable for {resource_type}: the server returned no total"),
         }
