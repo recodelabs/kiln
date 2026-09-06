@@ -20,7 +20,6 @@ pub struct Organization {
     pub version_id: Option<String>,
     pub last_updated: Option<String>,
     pub name: Option<String>,
-    pub active: Option<bool>,
     pub identifier: Vec<Identifier>,
     pub nhfr_code: Option<String>,
     pub nhfr_uid: Option<String>,
@@ -86,7 +85,6 @@ impl Organization {
         let mut org = Organization {
             id: id.clone(),
             name: str_field(obj, "name"),
-            active: obj.get("active").and_then(Value::as_bool),
             ..Default::default()
         };
         if let Some(Value::Object(meta)) = obj.get("meta") {
@@ -141,7 +139,6 @@ mod tests {
         assert_eq!(org.id, "org-1");
         assert_eq!(org.version_id.as_deref(), Some("7"));
         assert_eq!(org.name.as_deref(), Some("Siyi Health Post"));
-        assert_eq!(org.active, Some(true));
         assert_eq!(org.identifier.len(), 2);
         assert_eq!(org.nhfr_code.as_deref(), Some("05/08/1/1/1/0061"));
         assert_eq!(org.nhfr_uid.as_deref(), Some("21526030"));

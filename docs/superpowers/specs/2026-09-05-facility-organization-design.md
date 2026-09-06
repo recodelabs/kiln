@@ -1,7 +1,7 @@
 # Facility Organizations — design (plan 4 of the Rust rewrite)
 
 **Date:** 2026-09-05
-**Status:** Draft, awaiting review before the implementation plan is written.
+**Status:** Implemented on branch `facility-organizations` (plan `docs/superpowers/plans/2026-09-05-facility-organizations.md`). Amendment: mirrored columns (name, status, facility_level, ownership) reach the Organization only when the row's value differs from the snapshot Location's, so an unedited export never rewrites an Organization that has drifted from its Location.
 **Builds on:** plans 1–3 (all six commands on `main`), the mCSD facility pairing the Python `bake-points --paired-org` created in the registry.
 
 ## Problem

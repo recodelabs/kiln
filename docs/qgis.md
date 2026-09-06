@@ -55,6 +55,10 @@ Toggle editing on the GeoJSON layer (the pencil icon) and work as usual.
   Drawing a polygon on a place that only had a point adds a boundary to it.
 - **New places.** Use the add-feature tool. Leave `id` empty and kiln assigns
   a UUID, or type the id you want. Fill in `name`, `type` and `part_of`.
+- **Facilities are two resources.** Renaming a facility, retiring it, or
+  changing its level or ownership updates both its Location and its
+  Organization; the NHFR code, uid and the type labels live on the
+  Organization only. A new facility row creates both.
 - **Leave the derived columns alone.** `admin1_name`, `path`, `tier`,
   `depth`, `country` and the rest are rebuilt on the next transform and diff
   ignores them even if you change them.

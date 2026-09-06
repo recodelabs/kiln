@@ -62,7 +62,7 @@ README.md, docs/qgis.md, the spec status line
 - Create: `src/fhir/organization.rs`
 - Modify: `src/fhir/location.rs`, `src/fhir/mod.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/fhir/organization.rs` with the test module:
 
@@ -90,7 +90,6 @@ mod tests {
         assert_eq!(org.id, "org-1");
         assert_eq!(org.version_id.as_deref(), Some("7"));
         assert_eq!(org.name.as_deref(), Some("Siyi Health Post"));
-        assert_eq!(org.active, Some(true));
         assert_eq!(org.identifier.len(), 2);
         assert_eq!(org.nhfr_code.as_deref(), Some("05/08/1/1/1/0061"));
         assert_eq!(org.nhfr_uid.as_deref(), Some("21526030"));
@@ -121,13 +120,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 In `src/fhir/mod.rs` add `pub mod organization;` and change the re-export to `pub use location::{Boundary, Location};` plus `pub use organization::Organization;`.
 Run: `cargo test --bin kiln fhir::organization 2>&1 | grep -c 'cannot find'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/fhir/location.rs` change `fn str_field(` to `pub(crate) fn str_field(` and `fn coding_code_by_system(` to `pub(crate) fn coding_code_by_system(`.
 
@@ -151,7 +150,6 @@ pub struct Organization {
     pub version_id: Option<String>,
     pub last_updated: Option<String>,
     pub name: Option<String>,
-    pub active: Option<bool>,
     pub identifier: Vec<Identifier>,
     pub nhfr_code: Option<String>,
     pub nhfr_uid: Option<String>,
@@ -213,7 +211,6 @@ impl Organization {
         let mut org = Organization {
             id: id.clone(),
             name: str_field(obj, "name"),
-            active: obj.get("active").and_then(Value::as_bool),
             ..Default::default()
         };
         if let Some(Value::Object(meta)) = obj.get("meta") {
@@ -250,12 +247,12 @@ impl Organization {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --bin kiln fhir:: 2>&1 | grep 'test result'`
 Expected: all fhir tests pass including the 3 new ones.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/fhir/organization.rs src/fhir/location.rs src/fhir/mod.rs
@@ -271,7 +268,7 @@ git commit -m "fhir: Organization parsing with the NHFR codes and type labels"
 - Create: `src/snapshot/index.rs`
 - Modify: `src/diff/mod.rs` (use the shared index)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `src/snapshot/mod.rs` add to the test module:
 
@@ -321,13 +318,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Add `pub mod index;` to `src/snapshot/mod.rs`.
 Run: `cargo test --bin kiln snapshot:: 2>&1 | grep -c 'cannot find\|no method\|no field'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/snapshot/mod.rs` add constants and methods:
 
@@ -411,12 +408,12 @@ pub fn index_by_id(
 
 In `src/diff/mod.rs` delete `index_snapshot` and replace its one call with `index_by_id(&ndjson, &mut report, "snapshot_line_unparsed")`, importing `crate::snapshot::index::index_by_id`. Drop the now-unused `HashMap`/`Value` imports if the compiler says so (`HashMap` is still used by `Diff`).
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test 2>&1 | grep -E 'test result|^error' | sort | uniq -c`
 Expected: every suite ok (the diff binary tests still pass with the shared index).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/snapshot/mod.rs src/snapshot/index.rs src/diff/mod.rs src/extract/mod.rs
@@ -430,7 +427,7 @@ git commit -m "snapshot: organization paths, optional state fields, shared id in
 **Files:**
 - Modify: `src/extract/page.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the test module in `src/extract/page.rs`:
 
@@ -458,12 +455,12 @@ Add to the test module in `src/extract/page.rs`:
     }
 ```
 
-- [ ] **Step 2: Run the test to see it fail**
+- [x] **Step 2: Run the test to see it fail**
 
 Run: `cargo test --bin kiln page_resources_walks 2>&1 | grep -c 'cannot find'`
 Expected: `1` or more.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/extract/page.rs`, rename the existing function to `page_resources` with a `resource_type: &str` parameter after `server`, build the URL from it, and add the old name as a wrapper:
 
@@ -495,12 +492,12 @@ pub fn page_resources(
     // ... the existing body from here on, unchanged ...
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --bin kiln extract::page 2>&1 | grep 'test result'`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/extract/page.rs
@@ -514,7 +511,7 @@ git commit -m "extract: page any resource type"
 **Files:**
 - Modify: `src/snapshot/merge.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the test module in `src/snapshot/merge.rs` (it already has helpers that write an incoming file and build `PageNote`s; follow the shape of the nearest existing test for setup):
 
@@ -552,12 +549,12 @@ Add to the test module in `src/snapshot/merge.rs` (it already has helpers that w
     }
 ```
 
-- [ ] **Step 2: Run the test to see it fail**
+- [x] **Step 2: Run the test to see it fail**
 
 Run: `cargo test --bin kiln merge_file_upserts 2>&1 | grep -c 'cannot find'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/snapshot/merge.rs` add, above `merge`:
 
@@ -616,12 +613,12 @@ pub fn merge_file(
 
 Change `merge` to `merge_file(&MergeFiles::locations(snap), notes, full, lookup, failures, report)`. Change `merge_into`'s signature to `(files: &MergeFiles, input: &MergeInput, report: &mut Report)` and inside it replace `snap.locations()` with `files.existing`, `snap.incoming()` with `files.incoming`, `tmp` with `&files.tmp`, `"snapshot_line_unparsed"` with `files.unparsed_kind`, and the directory fsync's `snap.dir` with `files.existing.parent()` (skip when `None`). The `let tmp = ...` in `merge` goes away.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --bin kiln snapshot::merge 2>&1 | grep 'test result'`
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/snapshot/merge.rs
@@ -636,7 +633,7 @@ git commit -m "snapshot: merge_file for any snapshot file"
 - Modify: `src/extract/mod.rs`
 - Modify: `tests/extract.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/extract.rs` add two helpers after `since_search`:
 
@@ -756,12 +753,12 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test --test extract 2>&1 | grep -E 'test result|panicked' | head -5`
 Expected: the two new tests fail (no Organization request is made; the expectation with `.times(1)` is unmet).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/extract/mod.rs`:
 
@@ -831,12 +828,12 @@ In `src/extract/mod.rs`:
 
 Imports: `use crate::extract::page::{page_locations, page_resources};` and `use crate::snapshot::merge::{merge, merge_file, MergeFiles};`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --test extract 2>&1 | grep -E 'test result|panicked'`
 Expected: `test result: ok. 23 passed`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/extract/mod.rs tests/extract.rs
@@ -851,7 +848,7 @@ git commit -m "extract: page and merge Organizations with their own watermark"
 - Modify: `src/index/mod.rs`, `src/index/build.rs`
 - Modify: `src/write/schema.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `src/write/schema.rs`, extend `schema_has_the_documented_columns_in_order`:
 
@@ -868,12 +865,12 @@ In `src/write/schema.rs`, extend `schema_has_the_documented_columns_in_order`:
 
 and in `batch_round_trips_a_row`, set on the row `nhfr_code: Some("05/08".into()), organization_identifier: vec![(Some("s".into()), Some("v".into()))], organization_json: Some("{}".into())` and assert after `finish` that column `nhfr_code` at row 0 is `"05/08"` and `organization_json` is `"{}"` (the test already downcasts string columns by name; copy that pattern).
 
-- [ ] **Step 2: Run the test to see it fail**
+- [x] **Step 2: Run the test to see it fail**
 
 Run: `cargo test --bin kiln write::schema 2>&1 | grep -E 'no field|panicked' | head -3`
 Expected: compile error on the new fields.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src/index/mod.rs`: add `pub managing_organization: Option<String>,` to `IndexRecord` after `type_code`. `src/index/build.rs`: add `managing_organization: loc.managing_organization,` where the record is built.
 
@@ -952,12 +949,12 @@ In `push`, after `self.ownership.append_option(...)`:
 
 and after `push_list(&mut self.overlays, ...)`: `self.organization_json.append_option(r.organization_json.as_deref());`. In `finish`, push the five arrays after `self.ownership.finish()` and `self.organization_json.finish()` right after `self.overlays.finish()`, in the same order as the schema.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test --bin kiln write:: 2>&1 | grep 'test result'`
 Expected: all pass. `cargo test --test transform 2>&1 | grep 'test result'` also passes: new columns are null.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/index/mod.rs src/index/build.rs src/write/schema.rs
@@ -972,7 +969,7 @@ git commit -m "transform: organization columns in the schema"
 - Modify: `src/write/dataset.rs`, `src/transform.rs`
 - Modify: `tests/transform.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/transform.rs`:
 
@@ -1072,12 +1069,12 @@ fn facility_rows_carry_their_organization() {
 
 Add `use std::path::Path;` to the top of `tests/transform.rs` if it is not already imported (it is: `use std::path::Path;` is the first line).
 
-- [ ] **Step 2: Run the test to see it fail**
+- [x] **Step 2: Run the test to see it fail**
 
 Run: `cargo test --test transform facility_rows 2>&1 | grep -E 'panicked|test result' | head -3`
 Expected: fails on `nhfr["paired"]` being `None`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/write/dataset.rs`:
 
@@ -1158,12 +1155,12 @@ In `src/transform.rs`, before calling `write_dataset`:
 
 and pass `organizations` as the last argument; import `crate::snapshot::ORGANIZATIONS_FILE`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test 2>&1 | grep -E 'test result|^error' | sort | uniq -c`
 Expected: every suite ok, including the new transform test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/write/dataset.rs src/transform.rs tests/transform.rs
@@ -1177,7 +1174,7 @@ git commit -m "transform: fill the organization columns from the snapshot"
 **Files:**
 - Modify: `src/diff/input.rs`, `src/diff/rebuild.rs`, `src/diff/mod.rs`, `src/fhir/location.rs`
 
-- [ ] **Step 1: Write the failing unit tests**
+- [x] **Step 1: Write the failing unit tests**
 
 In `src/diff/input.rs`, extend `writable_columns_are_the_readme_second_group`:
 
@@ -1274,12 +1271,12 @@ In `src/diff/rebuild.rs` add to the test module:
 
 Add to the test module imports: `use crate::fhir::organization::{NHFR_CODE_SYSTEM, NHFR_UID_SYSTEM, ORGANIZATION_TYPE_SYSTEM};`.
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test --bin kiln diff:: 2>&1 | grep -cE 'cannot find|panicked'`
 Expected: non-zero.
 
-- [ ] **Step 3: Implement the columns and the Organization rebuild**
+- [x] **Step 3: Implement the columns and the Organization rebuild**
 
 `src/diff/input.rs`: extend `TEXT_COLUMNS` to 17 entries by appending `"nhfr_code", "nhfr_uid", "facility_level_text", "ownership_text"`, and replace the single identifier column with `pub const IDENTIFIER_COLUMNS: [&str; 2] = ["identifier", "organization_identifier"];` keeping `IDENTIFIER_COLUMN = "identifier"` for the Location rebuild. `is_writable` and `column_from_json` test membership in `IDENTIFIER_COLUMNS`.
 
@@ -1396,12 +1393,12 @@ pub fn new_organization(org_id: &str, row: &InputRow, report: &mut Report) -> Va
 
 Imports: `use crate::fhir::organization::{NHFR_CODE_SYSTEM, NHFR_UID_SYSTEM, ORGANIZATION_TYPE_SYSTEM};`. Note `Location` in `rebuild.rs` must expose `status`, `facility_level`, `ownership`: it does (they are fields of `Location`).
 
-- [ ] **Step 4: Run the unit tests**
+- [x] **Step 4: Run the unit tests**
 
 Run: `cargo test --bin kiln diff:: 2>&1 | grep 'test result'`
 Expected: all pass.
 
-- [ ] **Step 5: Wire the pair into the command**
+- [x] **Step 5: Wire the pair into the command**
 
 In `src/diff/mod.rs`:
 
@@ -1496,12 +1493,12 @@ pass it into `Diff { organizations, .. }`, and after the `N changed` line print:
 
 Imports: `crate::diff::input::ColumnValue`, `crate::diff::rebuild::{new_organization, rebuild, rebuild_organization}`, `crate::fhir::location::strip_reference`, `crate::snapshot::ORGANIZATIONS_FILE`.
 
-- [ ] **Step 6: Run the tests**
+- [x] **Step 6: Run the tests**
 
 Run: `cargo test 2>&1 | grep -E 'test result|^error' | sort | uniq -c`
 Expected: every suite ok. The diff binary tests still pass because their snapshot has no `organizations.ndjson` yet; Task 9 adds it.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/diff/input.rs src/diff/rebuild.rs src/diff/mod.rs src/fhir/location.rs
@@ -1516,7 +1513,7 @@ git commit -m "diff: rebuild the Organization beside its facility Location"
 - Modify: `src/load/order.rs`
 - Modify: `tests/load.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `src/load/order.rs` add to the test module:
 
@@ -1557,12 +1554,12 @@ fn organizations_are_posted_before_their_locations() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to see them fail**
+- [x] **Step 2: Run the tests to see them fail**
 
 Run: `cargo test organizations_ 2>&1 | grep -E 'test result|panicked' | head -4`
 Expected: both fail on ordering.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `src/load/order.rs`, change the sort to put non-Locations first:
 
@@ -1577,12 +1574,12 @@ In `src/load/order.rs`, change the sort to put non-Locations first:
 
 adjusting the `map(|(_, i)| ..)` to `map(|(_, _, i)| ..)`, and update the module doc: "Organizations (any non-Location) first, then Locations parents first: a Location's managingOrganization must exist before the Location is written."
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test organizations_ 2>&1 | grep 'test result'`
 Expected: both pass; `cargo test --test load` all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/load/order.rs tests/load.rs
@@ -1596,7 +1593,7 @@ git commit -m "load: Organizations before the Locations that reference them"
 **Files:**
 - Modify: `tests/diff.rs`
 
-- [ ] **Step 1: Give the test snapshot an Organization**
+- [x] **Step 1: Give the test snapshot an Organization**
 
 In `tests/diff.rs`:
 
@@ -1627,7 +1624,7 @@ Update the existing assertions that change shape:
 - `new_rows_become_creates_with_and_without_an_id`: `got.len() == 3`; `got[0]` is `Organization` `org-newsite` with `active == true` and `name` "New Site"; `got[1]` is the `newsite` Location with `managingOrganization.reference == "Organization/org-newsite"`; `got[2]` is the nameless row (no `type` column, so no pair). The stdout line still says `2 new`.
 - `duplicate_input_rows_are_reported_and_skipped`: `got.len() == 2` and the Location (`got[1]`) is named "First".
 
-- [ ] **Step 2: Add the pair tests**
+- [x] **Step 2: Add the pair tests**
 
 ```rust
 #[test]
@@ -1697,12 +1694,12 @@ fn without_an_organizations_file_diff_is_location_only() {
 
 `geoparquet_written_by_transform_round_trips_unchanged` needs no change: it must still print `0 changed` for both files even though the facility row now carries organisation columns and the Organization has a facility-level coding the Location lacks.
 
-- [ ] **Step 3: Run the tests**
+- [x] **Step 3: Run the tests**
 
 Run: `cargo test --test diff 2>&1 | grep -E 'test result|panicked|FAILED'`
 Expected: `test result: ok. 18 passed`. If the round-trip test fails, the `edited` rule in `rebuild_organization` is wrong; fix it, not the test.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/diff.rs
@@ -1716,7 +1713,7 @@ git commit -m "diff: binary tests for the facility pair"
 **Files:**
 - Modify: `README.md`, `docs/qgis.md`, `docs/superpowers/specs/2026-09-05-facility-organization-design.md`
 
-- [ ] **Step 1: README**
+- [x] **Step 1: README**
 
 1. "The snapshot" layout block: add `organizations.ndjson     one Organization per line, for the facility pairing` after `locations.ndjson`, and after the `state.json` paragraph add: "Organizations are paged after Locations with their own watermark, `organization_watermark` in `state.json`, and merged the same way. A snapshot written before kiln extracted Organizations has no file and no watermark, so the next run fetches them in full while Locations stay incremental."
 2. "Columns", writable group: add rows for `nhfr_code`, `nhfr_uid` (promoted from the Organization's identifiers by system), `organization_identifier` (list of struct), `facility_level_text`, `ownership_text` (the `text` of the Organization's type concepts); lossless fallback: add `organization_json`. Add one paragraph after the table: "A facility in the ICR registry is a Location paired with an Organization (`org-<location id>`) that carries the registry codes and the institution's name and type. Rows whose Location names a managing organisation that is in the snapshot carry its fields; the Location's own `facility_level` and `ownership` codings are what the row shows for those two, and a Location whose Organization is missing is reported as `organization_missing`, a name that differs as `organization_name_mismatch`."
@@ -1724,15 +1721,15 @@ git commit -m "diff: binary tests for the facility pair"
 4. "load": add "Organizations are posted before Locations, so a new pair resolves within the run."
 5. Report kinds in "The report": add `organization_missing`, `organization_name_mismatch` under Dataset; extract's list gains `organization_line_unparsed`.
 
-- [ ] **Step 2: docs/qgis.md**
+- [x] **Step 2: docs/qgis.md**
 
 In step 3 ("Edit"), add a bullet: "**Facilities are two resources.** Renaming a facility, retiring it, or changing its level or ownership updates both its Location and its Organization; the NHFR code, uid and the type labels live on the Organization only. A new facility row creates both."
 
-- [ ] **Step 3: Spec status**
+- [x] **Step 3: Spec status**
 
 Change the spec's `**Status:**` line to `Implemented on branch \`facility-organizations\` (plan \`docs/superpowers/plans/2026-09-05-facility-organizations.md\`). Amendment: mirrored columns (name, status, facility_level, ownership) reach the Organization only when the row's value differs from the snapshot Location's, so an unedited export never rewrites an Organization that has drifted from its Location.`
 
-- [ ] **Step 4: Real data**
+- [x] **Step 4: Real data**
 
 With the token from `CLOUDSDK_PYTHON=/opt/homebrew/bin/python3.14 gcloud auth print-access-token`:
 
@@ -1746,7 +1743,7 @@ S=https://healthcare.googleapis.com/v1/projects/icr-registry/locations/us-west1/
 
 Expected: `organizations: 1468 resources`; the transform report shows exactly one `organization_name_mismatch` (facility `a621fa4f-...`, renamed earlier without its Organization); the diff prints `0 changed`. Record the three numbers in the PR description. Do not load anything.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md docs/qgis.md docs/superpowers/specs/2026-09-05-facility-organization-design.md
