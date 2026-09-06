@@ -302,8 +302,9 @@ rules follow:
   occasionally, or whenever you suspect drift.
 
 To make drift visible, every incremental run ends by asking the server for
-its resource count (`_summary=count`) per type and comparing it with the
-snapshot. A difference is reported as `count_mismatch`, naming the two
+its resource count per type (`_summary=count`, or a zero-row search with
+`_total=accurate` for servers such as the Google Healthcare API that reject
+`_summary`) and comparing it with the snapshot. A difference is reported as `count_mismatch`, naming the two
 numbers and pointing at `--full`; it cannot say which resource went, only
 that one did. A server that returns no total is noted on stderr and the
 check is skipped.
