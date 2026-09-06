@@ -72,6 +72,7 @@ pub fn build_index(ndjson: &Path, country_override: Option<&str>) -> crate::erro
             name: loc.name,
             pcode: loc.pcode,
             type_code: loc.type_code,
+            managing_organization: loc.managing_organization,
             offset: line.offset,
             len: line.len,
             geometry,
