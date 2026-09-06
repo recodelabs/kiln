@@ -10,6 +10,7 @@ pub const DEFAULT_MAX_CONSECUTIVE_FAILURES: usize = 50;
 /// Generous by design: a large boundary over a slow link can legitimately
 /// take minutes, and reqwest's blocking client has no per-read timeout.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
+pub const DEFAULT_BATCH_SIZE: usize = 100;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -32,6 +33,10 @@ pub enum Command {
     Extract(ExtractArgs),
     /// Extract then transform
     Run(RunArgs),
+    /// Compare an edited GeoJSON or GeoParquet file to the snapshot; write changed Locations as FHIR NDJSON (offline)
+    Diff(DiffArgs),
+    /// Send changed resources to a FHIR server as version-checked transaction bundles
+    Load(LoadArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -128,4 +133,45 @@ impl RunArgs {
             partition_by: self.partition_by.clone(),
         }
     }
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct DiffArgs {
+    /// Snapshot directory containing locations.ndjson
+    #[arg(long)]
+    pub snapshot: PathBuf,
+    /// Edited file: .geojson/.json (FeatureCollection), .geojsonl/.geojsons (one Feature per line), or .parquet
+    #[arg(long = "in")]
+    pub input: PathBuf,
+    /// Output NDJSON file of changed resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the diff report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct LoadArgs {
+    /// Base URL of the FHIR server
+    #[arg(long)]
+    pub server: String,
+    /// Bearer token; falls back to $KILN_TOKEN
+    #[arg(long, env = "KILN_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
+    /// NDJSON of FHIR resources to load (normally diff output)
+    #[arg(long = "in")]
+    pub input: PathBuf,
+    /// Run the preflight and print the bundle plan without posting
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Resources per transaction bundle
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    pub batch_size: usize,
+    /// Attempts per request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
+    /// Total timeout per HTTP request, in seconds
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    pub timeout: u64,
 }
