@@ -1,5 +1,9 @@
 //! `kiln load`: FHIR NDJSON -> transaction bundles with If-Match.
 
+pub mod bundle;
+pub mod capability;
+pub mod order;
+
 use crate::cli::LoadArgs;
 use crate::error::{KilnError, Result};
 
