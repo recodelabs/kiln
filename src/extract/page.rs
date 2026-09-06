@@ -77,8 +77,22 @@ pub fn page_locations(
     incoming: &Path,
     report: &mut Report,
 ) -> Result<PageResult> {
+    page_resources(client, server, "Location", since, incoming, report)
+}
+
+/// Walk `<server>/<resource_type>` with `_count` paging, appending every
+/// resource to `incoming` and noting what the merge needs. Boundary URLs
+/// are noted for any type; only Locations carry them.
+pub fn page_resources(
+    client: &FhirClient,
+    server: &str,
+    resource_type: &str,
+    since: Option<&str>,
+    incoming: &Path,
+    report: &mut Report,
+) -> Result<PageResult> {
     let base = server.trim_end_matches('/');
-    let mut url = Url::parse(&format!("{base}/Location"))
+    let mut url = Url::parse(&format!("{base}/{resource_type}"))
         .map_err(|_| KilnError::Usage(format!("--server is not a valid URL: {server}")))?;
     {
         let mut qp = url.query_pairs_mut();
@@ -185,6 +199,28 @@ mod tests {
     use crate::extract::client::FhirClient;
     use crate::report::Report;
     use httptest::{matchers::*, responders::*, Expectation, Server};
+
+    #[test]
+    fn page_resources_walks_the_named_type() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Organization"))
+                .times(1)
+                .respond_with(status_code(200).body(bundle(
+                    &[serde_json::json!({"resourceType":"Organization","id":"org-1","meta":{"lastUpdated":"2026-01-01T00:00:00Z"}})],
+                    None,
+                ))),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let incoming = dir.path().join("inc.ndjson");
+        let client = FhirClient::new(None, 1, std::time::Duration::from_secs(5)).unwrap();
+        let mut report = Report::default();
+        let got = page_resources(&client, &server.url("/fhir").to_string(), "Organization", None, &incoming, &mut report).unwrap();
+        assert_eq!(got.notes.len(), 1);
+        assert_eq!(got.notes[0].id, "org-1");
+        assert_eq!(got.notes[0].boundary_url, None);
+        assert!(std::fs::read_to_string(&incoming).unwrap().contains("\"id\":\"org-1\""));
+    }
 
     fn bundle(entries: &[serde_json::Value], next: Option<&str>) -> String {
         let mut b = serde_json::json!({"resourceType":"Bundle","type":"searchset","entry": entries.iter().map(|r| serde_json::json!({"resource": r})).collect::<Vec<_>>()});
