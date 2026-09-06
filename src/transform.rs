@@ -11,13 +11,19 @@ use crate::write::dataset::write_dataset;
 
 pub const SNAPSHOT_FILE: &str = "locations.ndjson";
 
-pub fn run_transform(args: &TransformArgs) -> Result<()> {
-    if args.out.exists() && !args.out.is_dir() {
+/// `--out` must either not exist yet or already be a directory.
+pub fn check_out_dir(out: &Path) -> Result<()> {
+    if out.exists() && !out.is_dir() {
         return Err(KilnError::Usage(format!(
             "--out {}: not a directory",
-            args.out.display()
+            out.display()
         )));
     }
+    Ok(())
+}
+
+pub fn run_transform(args: &TransformArgs) -> Result<()> {
+    check_out_dir(&args.out)?;
     let ndjson = args.snapshot.join(SNAPSHOT_FILE);
     if !ndjson.is_file() {
         return Err(KilnError::Usage(format!(

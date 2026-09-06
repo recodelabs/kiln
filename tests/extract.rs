@@ -879,7 +879,40 @@ fn run_extracts_then_transforms() {
         "{stdout_text}"
     );
 
+    let stderr_text = stderr(&assert);
+    assert!(stderr_text.contains("== extract =="), "{stderr_text}");
+    assert!(stderr_text.contains("== transform =="), "{stderr_text}");
+
     assert!(snap.path().join("state.json").exists());
+}
+
+#[test]
+fn run_rejects_a_bad_out_before_extracting() {
+    let server = Server::run();
+    let snap = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let bad_out = out.path().join("not-a-dir");
+    std::fs::write(&bad_out, b"nope").unwrap();
+
+    server.expect(
+        Expectation::matching(full_search())
+            .times(0)
+            .respond_with(ok(bundle(vec![], None))),
+    );
+
+    kiln()
+        .args([
+            "run",
+            "--server",
+            &server.url("/fhir").to_string(),
+            "--snapshot",
+        ])
+        .arg(snap.path())
+        .arg("--out")
+        .arg(&bad_out)
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
