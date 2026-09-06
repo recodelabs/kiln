@@ -193,10 +193,44 @@ pub fn page_resources(
     Ok(PageResult { notes, pages })
 }
 
+/// `GET <server>/<resource_type>?_summary=count` -> the server's total for
+/// the type, or `None` when the server did not answer with a usable
+/// `Bundle.total` (some servers do not compute one). Never an error: the
+/// count is a cross-check, not a phase.
+pub fn count_resources(client: &FhirClient, server: &str, resource_type: &str) -> Option<u64> {
+    let base = server.trim_end_matches('/');
+    let url = format!("{base}/{resource_type}?_summary=count");
+    let fetched = client.get(&url).ok()?;
+    let bundle: Value = serde_json::from_slice(&fetched.body).ok()?;
+    bundle.get("total")?.as_u64()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::extract::client::FhirClient;
+
+    #[test]
+    fn count_resources_reads_the_bundle_total_or_gives_up() {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(all_of![
+                request::method_path("GET", "/fhir/Location"),
+                request::query(url_decoded(contains(("_summary", "count")))),
+            ])
+            .respond_with(status_code(200).body(r#"{"resourceType":"Bundle","type":"searchset","total":42}"#)),
+        );
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/fhir/Organization"))
+                .respond_with(status_code(200).body(r#"{"resourceType":"Bundle","type":"searchset"}"#)),
+        );
+        let client = FhirClient::new(None, 1, std::time::Duration::from_secs(5)).unwrap();
+        let base = server.url("/fhir").to_string();
+        assert_eq!(count_resources(&client, &base, "Location"), Some(42));
+        assert_eq!(count_resources(&client, &base, "Organization"), None);
+        assert_eq!(count_resources(&client, "http://127.0.0.1:9/nothing", "Location"), None);
+    }
+
     use crate::report::Report;
     use httptest::{matchers::*, responders::*, Expectation, Server};
 
