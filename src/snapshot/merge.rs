@@ -110,26 +110,62 @@ pub fn merge(
     failures: &HashMap<String, String>,
     report: &mut Report,
 ) -> Result<MergeStats> {
+    merge_file(&MergeFiles::locations(snap), notes, full, lookup, failures, report)
+}
+
+/// The three files one merge touches, plus the report kind for a line in
+/// the existing file that cannot be parsed.
+pub struct MergeFiles {
+    pub existing: std::path::PathBuf,
+    pub tmp: std::path::PathBuf,
+    pub incoming: std::path::PathBuf,
+    pub unparsed_kind: &'static str,
+}
+
+impl MergeFiles {
+    pub fn locations(snap: &Snapshot) -> Self {
+        Self {
+            existing: snap.locations(),
+            tmp: snap.locations_tmp(),
+            incoming: snap.incoming(),
+            unparsed_kind: "snapshot_line_unparsed",
+        }
+    }
+    pub fn organizations(snap: &Snapshot) -> Self {
+        Self {
+            existing: snap.organizations(),
+            tmp: snap.organizations_tmp(),
+            incoming: snap.incoming_organizations(),
+            unparsed_kind: "organization_line_unparsed",
+        }
+    }
+}
+
+/// `merge` for any snapshot file. Boundary inlining only ever triggers on
+/// notes that carry a `boundary_url`, which Organizations never do.
+pub fn merge_file(
+    files: &MergeFiles,
+    notes: &[PageNote],
+    full: bool,
+    lookup: &dyn Fn(&str) -> Option<Vec<u8>>,
+    failures: &HashMap<String, String>,
+    report: &mut Report,
+) -> Result<MergeStats> {
     let input = MergeInput {
         notes,
         full,
         lookup,
         failures,
     };
-    let tmp = snap.locations_tmp();
-    let result = merge_into(snap, &input, report, &tmp);
+    let result = merge_into(files, &input, report);
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&files.tmp);
     }
     result
 }
 
-fn merge_into(
-    snap: &Snapshot,
-    input: &MergeInput,
-    report: &mut Report,
-    tmp: &Path,
-) -> Result<MergeStats> {
+fn merge_into(files: &MergeFiles, input: &MergeInput, report: &mut Report) -> Result<MergeStats> {
+    let tmp: &Path = &files.tmp;
     let incoming_ids: HashSet<&str> = input.notes.iter().map(|n| n.id.as_str()).collect();
     // Last occurrence of each id in the incoming file wins.
     let mut last_index: HashMap<&str, usize> = HashMap::new();
@@ -147,8 +183,8 @@ fn merge_into(
     };
     let mut old_ids: HashSet<String> = HashSet::new();
 
-    if !input.full && snap.locations().exists() {
-        for line in NdjsonReader::open(&snap.locations())? {
+    if !input.full && files.existing.exists() {
+        for line in NdjsonReader::open(&files.existing)? {
             let line = line?;
             match id_and_updated(&line.text) {
                 Some((id, _)) if incoming_ids.contains(id.as_str()) => {
@@ -165,7 +201,7 @@ fn merge_into(
                     old_ids.insert(id);
                 }
                 None => report.add(
-                    "snapshot_line_unparsed",
+                    files.unparsed_kind,
                     &format!("line {}", line.number),
                     "not a JSON object with an id; copied unchanged",
                 ),
@@ -176,7 +212,7 @@ fn merge_into(
     }
 
     let mut seen = 0usize;
-    for (i, line) in NdjsonReader::open(&snap.incoming())?.enumerate() {
+    for (i, line) in NdjsonReader::open(&files.incoming)?.enumerate() {
         let line = line?;
         seen += 1;
         let Some(note) = input.notes.get(i) else {
@@ -243,14 +279,16 @@ fn merge_into(
         .into_inner()
         .map_err(|e| KilnError::io(tmp, e.into_error()))?;
     file.sync_all().map_err(|e| KilnError::io(tmp, e))?;
-    std::fs::rename(tmp, snap.locations()).map_err(|e| KilnError::io(tmp, e))?;
+    std::fs::rename(tmp, &files.existing).map_err(|e| KilnError::io(tmp, e))?;
     // Best-effort, as in `State::write`: not every platform/filesystem
     // supports fsync on a directory, and that's not worth failing an
     // otherwise-successful merge over.
-    if let Ok(d) = std::fs::File::open(&snap.dir) {
-        let _ = d.sync_all();
+    if let Some(dir) = files.existing.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
     }
-    let _ = std::fs::remove_file(snap.incoming());
+    let _ = std::fs::remove_file(&files.incoming);
     Ok(stats)
 }
 
@@ -258,6 +296,38 @@ fn merge_into(
 mod tests {
     use super::*;
     use crate::extract::page::PageNote;
+
+    #[test]
+    fn merge_file_upserts_organizations_without_touching_locations() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = Snapshot::new(dir.path());
+        std::fs::write(snap.locations(), "{\"id\":\"loc\"}\n").unwrap();
+        std::fs::write(
+            snap.organizations(),
+            "{\"resourceType\":\"Organization\",\"id\":\"org-a\",\"meta\":{\"lastUpdated\":\"2026-01-01T00:00:00Z\"},\"name\":\"old\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            snap.incoming_organizations(),
+            "{\"resourceType\":\"Organization\",\"id\":\"org-a\",\"meta\":{\"lastUpdated\":\"2026-01-02T00:00:00Z\"},\"name\":\"new\"}\n{\"resourceType\":\"Organization\",\"id\":\"org-b\",\"meta\":{\"lastUpdated\":\"2026-01-03T00:00:00Z\"}}\n",
+        )
+        .unwrap();
+        let notes = vec![
+            PageNote { id: "org-a".into(), last_updated: Some("2026-01-02T00:00:00Z".into()), boundary_url: None },
+            PageNote { id: "org-b".into(), last_updated: Some("2026-01-03T00:00:00Z".into()), boundary_url: None },
+        ];
+        let mut report = Report::default();
+        let files = MergeFiles::organizations(&snap);
+        let stats = merge_file(&files, &notes, false, &|_| None, &HashMap::new(), &mut report).unwrap();
+        assert_eq!((stats.total, stats.added, stats.updated), (2, 1, 1));
+        assert_eq!(stats.watermark.as_deref(), Some("2026-01-03T00:00:00Z"));
+        let text = std::fs::read_to_string(snap.organizations()).unwrap();
+        assert!(text.contains("\"name\":\"new\""));
+        assert!(!text.contains("old"));
+        assert_eq!(std::fs::read_to_string(snap.locations()).unwrap(), "{\"id\":\"loc\"}\n");
+        assert!(!snap.incoming_organizations().exists());
+        assert!(!snap.organizations_tmp().exists());
+    }
     use crate::report::Report;
     use std::collections::HashMap;
 
