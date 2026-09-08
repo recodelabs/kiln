@@ -3,11 +3,20 @@
 //! feature); GeoParquet 1.1 `geo` metadata and the bbox column are written
 //! for readers that predate the logical type. Matches what the spike in
 //! docs/superpowers/spikes/2026-09-05-rust-native-geoparquet produced.
+//!
+//! No `ARROW:schema` blob is embedded. When that blob is present pyarrow
+//! rebuilds the schema metadata from it and drops every other footer key --
+//! including `geo`, which is appended at close and so can never be inside a
+//! blob written at open. Tools that detect GeoParquet through pyarrow
+//! (GeoPandas, portolan-cli, ...) would then see plain Parquet. Without the
+//! blob they read the footer as written; every Arrow type here is recoverable
+//! from the Parquet logical types alone.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow_array::Array;
+use parquet::arrow::arrow_writer::ArrowWriterOptions;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
@@ -52,7 +61,10 @@ impl PartitionWriter {
             // somehow exceeds the caller's intended row-group size.
             .set_max_row_group_row_count(Some(row_group_size.max(1)))
             .build();
-        let writer = ArrowWriter::try_new(file, output_schema(), Some(props))
+        let options = ArrowWriterOptions::new()
+            .with_properties(props)
+            .with_skip_arrow_metadata(true);
+        let writer = ArrowWriter::try_new_with_options(file, output_schema(), options)
             .map_err(|e| KilnError::parquet_at(path, e))?;
         Ok(Self {
             writer,
@@ -230,13 +242,13 @@ mod tests {
             .unwrap();
         let bbox1 = rg1.geo_statistics().unwrap().bounding_box().unwrap();
         assert_eq!((bbox1.get_xmin(), bbox1.get_xmax()), (50.0, 50.0));
-        let geo = meta
-            .file_metadata()
-            .key_value_metadata()
-            .unwrap()
-            .iter()
-            .find(|kv| kv.key == "geo")
-            .unwrap();
+        let kv = meta.file_metadata().key_value_metadata().unwrap();
+        assert!(
+            kv.iter().all(|kv| kv.key != "ARROW:schema"),
+            "an embedded Arrow schema makes pyarrow drop the geo key: {:?}",
+            kv.iter().map(|kv| &kv.key).collect::<Vec<_>>()
+        );
+        let geo = kv.iter().find(|kv| kv.key == "geo").unwrap();
         let geo: serde_json::Value = serde_json::from_str(geo.value.as_ref().unwrap()).unwrap();
         assert_eq!(geo["primary_column"], "geometry");
         assert_eq!(
