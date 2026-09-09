@@ -91,10 +91,6 @@ impl GeoTiff {
         g.read_tile(0, 0)?;
         Ok(g)
     }
-
-    pub fn label(&self) -> &str {
-        &self.label
-    }
 }
 
 /// ModelPixelScale + ModelTiepoint → GeoTransform. A tiepoint elsewhere
@@ -244,7 +240,7 @@ pub const FIXTURE: &[u8] = include_bytes!("../../tests/fixtures/raster/pop_small
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raster::MemRaster;
+    use crate::raster::{is_data, MemRaster};
 
     fn fixture() -> GeoTiff {
         GeoTiff::open(FIXTURE.to_vec(), "pop_small_cog.tif").unwrap()
@@ -260,7 +256,6 @@ mod tests {
         let t = g.transform();
         assert!((t.x0 - 3.0).abs() < 1e-12 && (t.y0 - 7.0).abs() < 1e-12);
         assert!((t.px - 0.1).abs() < 1e-12 && (t.py - 0.1).abs() < 1e-12);
-        assert_eq!(g.label(), "pop_small_cog.tif");
     }
 
     #[test]
@@ -290,7 +285,7 @@ mod tests {
                 let t = g.read_tile(tx, ty).unwrap();
                 assert_eq!(t, m.read_tile(tx, ty).unwrap(), "tile ({tx}, {ty})");
                 for &v in &t.data {
-                    if g.is_data(v) {
+                    if is_data(v, g.nodata()) {
                         sum += f64::from(v);
                         n += 1;
                     }
@@ -351,7 +346,7 @@ mod tests {
                 let t = g.read_tile(tx, ty).unwrap();
                 assert_eq!(t, m.read_tile(tx, ty).unwrap(), "tile ({tx}, {ty})");
                 for &v in &t.data {
-                    if g.is_data(v) {
+                    if is_data(v, g.nodata()) {
                         sum += f64::from(v);
                         n += 1;
                     }

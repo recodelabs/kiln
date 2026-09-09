@@ -47,9 +47,6 @@ impl GeoTransform {
     pub fn row_of(&self, lat: f64) -> f64 {
         (self.y0 - lat) / self.py
     }
-    pub fn lon_center(&self, col: u32) -> f64 {
-        self.x0 + (f64::from(col) + 0.5) * self.px
-    }
     pub fn lat_center(&self, row: u32) -> f64 {
         self.y0 - (f64::from(row) + 0.5) * self.py
     }
@@ -83,10 +80,6 @@ pub trait Raster {
     }
     fn tiles_down(&self) -> u32 {
         self.height().div_ceil(self.tile_size().1.max(1))
-    }
-    /// True for a value that carries data: finite and not the nodata marker.
-    fn is_data(&self, v: f32) -> bool {
-        is_data(v, self.nodata())
     }
 }
 
@@ -201,9 +194,9 @@ mod tests {
         assert_eq!(T.row_of(7.0), 0.0);
         assert!((T.col_of(3.25) - 2.5).abs() < 1e-9);
         assert!((T.row_of(6.75) - 2.5).abs() < 1e-9);
-        assert!((T.lon_center(0) - 3.05).abs() < 1e-9);
+        assert!((T.col_of(3.05) - 0.5).abs() < 1e-9);
         assert!((T.lat_center(0) - 6.95).abs() < 1e-9);
-        assert!((T.lon_center(39) - 6.95).abs() < 1e-9);
+        assert!((T.col_of(6.95) - 39.5).abs() < 1e-9);
         assert!((T.lat_center(29) - 4.05).abs() < 1e-9);
     }
 
@@ -220,9 +213,9 @@ mod tests {
         assert_eq!((t.width, t.height), (8, 14));
         assert_eq!(t.data[0], 1633.0, "row 16, col 32");
         assert_eq!(*t.data.last().unwrap(), -99999.0);
-        assert!(!r.is_data(-99999.0));
-        assert!(!r.is_data(f32::NAN));
-        assert!(r.is_data(0.0));
+        assert!(!is_data(-99999.0, r.nodata()));
+        assert!(!is_data(f32::NAN, r.nodata()));
+        assert!(is_data(0.0, r.nodata()));
         assert!(r.read_tile(3, 0).is_err());
         assert!(r.read_tile(0, 2).is_err());
     }
@@ -267,7 +260,8 @@ mod tests {
     #[test]
     fn a_pixel_centre_maps_back_to_its_own_pixel() {
         for (c, r) in [(0u32, 0u32), (39, 0), (0, 29), (39, 29), (17, 11)] {
-            assert_eq!(T.col_of(T.lon_center(c)).floor() as u32, c);
+            let lon = T.x0 + (f64::from(c) + 0.5) * T.px;
+            assert_eq!(T.col_of(lon).floor() as u32, c);
             assert_eq!(T.row_of(T.lat_center(r)).floor() as u32, r);
         }
     }
