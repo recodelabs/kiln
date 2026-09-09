@@ -251,7 +251,7 @@ pub fn remove_cell(obj: &mut Object, scheme: &str, level: u32) {
         exts.retain(|e| {
             e.as_object()
                 .and_then(cell_from_extension)
-                .map_or(true, |c| !(c.scheme == scheme && c.level == level))
+                .is_none_or(|c| !(c.scheme == scheme && c.level == level))
         });
         if exts.is_empty() {
             obj.remove("extension");
@@ -278,7 +278,8 @@ mod tests {
         let n = (1u64 << level) as f64;
         let x = ((lon + 180.0) / 360.0 * n) as u64;
         let lat = lat.to_radians();
-        let y = ((1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / std::f64::consts::PI) / 2.0 * n) as u64;
+        let y =
+            ((1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / std::f64::consts::PI) / 2.0 * n) as u64;
         (x, y)
     }
 
@@ -327,9 +328,23 @@ mod tests {
 
     #[test]
     fn parse_scheme_level_validates() {
-        assert_eq!(parse_scheme_level("quadkey:18").unwrap(), ("quadkey".into(), 18));
-        assert_eq!(parse_scheme_level("geohash:8").unwrap(), ("geohash".into(), 8));
-        for bad in ["quadkey", "quadkey:x", "s2:5", "quadkey:24", "quadkey:0", "geohash:13", "h3:9"] {
+        assert_eq!(
+            parse_scheme_level("quadkey:18").unwrap(),
+            ("quadkey".into(), 18)
+        );
+        assert_eq!(
+            parse_scheme_level("geohash:8").unwrap(),
+            ("geohash".into(), 8)
+        );
+        for bad in [
+            "quadkey",
+            "quadkey:x",
+            "s2:5",
+            "quadkey:24",
+            "quadkey:0",
+            "geohash:13",
+            "h3:9",
+        ] {
             assert!(parse_scheme_level(bad).is_err(), "{bad}");
         }
     }
@@ -356,7 +371,10 @@ mod tests {
         assert_eq!(refresh_cells(&mut obj, 3.39, 6.45), 3);
         let cells = cells_of(&obj);
         assert_eq!(cells.len(), 2, "h3 dropped: kiln cannot recompute it");
-        assert_eq!(deepest_quadkey(&cells).unwrap().cell, quadkey(3.39, 6.45, 18));
+        assert_eq!(
+            deepest_quadkey(&cells).unwrap().cell,
+            quadkey(3.39, 6.45, 18)
+        );
         remove_all_cells(&mut obj);
         assert!(obj.get("extension").is_none());
     }

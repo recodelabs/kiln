@@ -118,8 +118,10 @@ fn bundles_arrive_parents_first_with_if_match_on_existing_entries() {
     server.expect(
         Expectation::matching(posted_bundle(|b| {
             b["type"] == "transaction"
-                && b["entry"][0]["request"] == json!({"method": "PUT", "url": "Location/state", "ifMatch": "W/\"3\""})
-                && b["entry"][1]["request"] == json!({"method": "PUT", "url": "Location/ward", "ifMatch": "W/\"1\""})
+                && b["entry"][0]["request"]
+                    == json!({"method": "PUT", "url": "Location/state", "ifMatch": "W/\"3\""})
+                && b["entry"][1]["request"]
+                    == json!({"method": "PUT", "url": "Location/ward", "ifMatch": "W/\"1\""})
                 && b["entry"][0]["resource"]["name"] == "state"
         }))
         .times(1)
@@ -127,22 +129,34 @@ fn bundles_arrive_parents_first_with_if_match_on_existing_entries() {
     );
     server.expect(
         Expectation::matching(posted_bundle(|b| {
-            b["entry"][0]["request"] == json!({"method": "PUT", "url": "Location/clinic", "ifMatch": "W/\"2\""})
+            b["entry"][0]["request"]
+                == json!({"method": "PUT", "url": "Location/clinic", "ifMatch": "W/\"2\""})
                 && b["entry"][1]["request"] == json!({"method": "PUT", "url": "Location/newsite"})
         }))
         .times(1)
         .respond_with(ok(transaction_response())),
     );
     let a = load(&server, &input, &["--batch-size", "2"]).success();
-    assert!(stderr(&a).contains("bundle 2/2 committed (2 resources)"), "{}", stderr(&a));
-    assert!(stdout(&a).contains("Loaded 4 resources in 2 bundle(s)"), "{}", stdout(&a));
+    assert!(
+        stderr(&a).contains("bundle 2/2 committed (2 resources)"),
+        "{}",
+        stderr(&a)
+    );
+    assert!(
+        stdout(&a).contains("Loaded 4 resources in 2 bundle(s)"),
+        "{}",
+        stdout(&a)
+    );
 }
 
 #[test]
 fn update_create_is_required_only_when_the_input_creates() {
     let server = Server::run();
     let dir = tempfile::tempdir().unwrap();
-    let input = write_ndjson(dir.path(), &[loc("a", Some("1"), None), loc("b", None, None)]);
+    let input = write_ndjson(
+        dir.path(),
+        &[loc("a", Some("1"), None), loc("b", None, None)],
+    );
     expect_metadata(&server, false);
     load(&server, &input, &[])
         .failure()
@@ -177,7 +191,9 @@ fn an_unstated_update_create_flag_warns_and_proceeds() {
     );
     load(&server, &input, &[])
         .success()
-        .stderr(predicates::str::contains("does not state updateCreate for Location"));
+        .stderr(predicates::str::contains(
+            "does not state updateCreate for Location",
+        ));
 }
 
 #[test]
@@ -186,7 +202,11 @@ fn a_412_names_the_conflicting_ids_and_stops() {
     let dir = tempfile::tempdir().unwrap();
     let input = write_ndjson(
         dir.path(),
-        &[loc("a", Some("1"), None), loc("b", Some("2"), None), loc("c", Some("3"), None)],
+        &[
+            loc("a", Some("1"), None),
+            loc("b", Some("2"), None),
+            loc("c", Some("3"), None),
+        ],
     );
     expect_metadata(&server, true);
     server.expect(
@@ -200,12 +220,20 @@ fn a_412_names_the_conflicting_ids_and_stops() {
     server.expect(
         Expectation::matching(request::method_path("GET", "/fhir/Location/b"))
             .times(1)
-            .respond_with(ok(json!({"resourceType": "Location", "id": "b", "meta": {"versionId": "5"}}).to_string())),
+            .respond_with(ok(
+                json!({"resourceType": "Location", "id": "b", "meta": {"versionId": "5"}})
+                    .to_string(),
+            )),
     );
-    let a = load(&server, &input, &["--batch-size", "1"]).failure().code(1);
+    let a = load(&server, &input, &["--batch-size", "1"])
+        .failure()
+        .code(1);
     let err = stderr(&a);
     assert!(err.contains("bundle 2/3 rejected with HTTP 412"), "{err}");
-    assert!(err.contains("Location/b (expected version 2, server has 5)"), "{err}");
+    assert!(
+        err.contains("Location/b (expected version 2, server has 5)"),
+        "{err}"
+    );
     assert!(err.contains("bundle 1/3 committed"), "{err}");
     assert!(err.contains("diff again"), "{err}");
 }
@@ -241,12 +269,21 @@ fn a_503_is_retried_and_a_400_aborts_with_the_body() {
 fn dry_run_posts_nothing_and_prints_the_plan() {
     let server = Server::run();
     let dir = tempfile::tempdir().unwrap();
-    let input = write_ndjson(dir.path(), &[loc("clinic", None, Some("state")), loc("state", Some("3"), None)]);
+    let input = write_ndjson(
+        dir.path(),
+        &[
+            loc("clinic", None, Some("state")),
+            loc("state", Some("3"), None),
+        ],
+    );
     expect_metadata(&server, true);
     let a = load(&server, &input, &["--dry-run"]).success();
     let out = stdout(&a);
     assert!(out.contains("Dry run: 2 resources in 1 bundle(s)"), "{out}");
-    assert!(out.contains("bundle 1/1: Location/state update@3, Location/clinic create"), "{out}");
+    assert!(
+        out.contains("bundle 1/1: Location/state update@3, Location/clinic create"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -254,20 +291,32 @@ fn input_problems_are_usage_errors_before_any_request() {
     let server = Server::run();
     let dir = tempfile::tempdir().unwrap();
 
-    let input = write_ndjson(dir.path(), &[loc("a", Some("1"), Some("b")), loc("b", Some("1"), Some("a"))]);
+    let input = write_ndjson(
+        dir.path(),
+        &[
+            loc("a", Some("1"), Some("b")),
+            loc("b", Some("1"), Some("a")),
+        ],
+    );
     load(&server, &input, &[])
         .failure()
         .code(2)
         .stderr(predicates::str::contains("cycle"));
 
     let server = Server::run();
-    let input = write_ndjson(dir.path(), &[loc("a", Some("1"), None), loc("a", Some("1"), None)]);
+    let input = write_ndjson(
+        dir.path(),
+        &[loc("a", Some("1"), None), loc("a", Some("1"), None)],
+    );
     load(&server, &input, &[])
         .failure()
         .code(2)
         .stderr(predicates::str::contains("duplicate resource Location/a"));
 
-    let input = write_ndjson(dir.path(), &[json!({"resourceType": "Location", "name": "no id"})]);
+    let input = write_ndjson(
+        dir.path(),
+        &[json!({"resourceType": "Location", "name": "no id"})],
+    );
     load(&server, &input, &[])
         .failure()
         .code(2)
@@ -291,7 +340,8 @@ fn organizations_are_posted_before_their_locations() {
     expect_metadata(&server, true);
     server.expect(
         Expectation::matching(posted_bundle(|b| {
-            b["entry"][0]["request"] == json!({"method": "PUT", "url": "Organization/org-clinic", "ifMatch": "W/\"5\""})
+            b["entry"][0]["request"]
+                == json!({"method": "PUT", "url": "Organization/org-clinic", "ifMatch": "W/\"5\""})
                 && b["entry"][1]["request"]["url"] == "Location/clinic"
         }))
         .times(1)

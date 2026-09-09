@@ -110,7 +110,14 @@ pub fn merge(
     failures: &HashMap<String, String>,
     report: &mut Report,
 ) -> Result<MergeStats> {
-    merge_file(&MergeFiles::locations(snap), notes, full, lookup, failures, report)
+    merge_file(
+        &MergeFiles::locations(snap),
+        notes,
+        full,
+        lookup,
+        failures,
+        report,
+    )
 }
 
 /// The three files one merge touches, plus the report kind for a line in
@@ -313,18 +320,37 @@ mod tests {
         )
         .unwrap();
         let notes = vec![
-            PageNote { id: "org-a".into(), last_updated: Some("2026-01-02T00:00:00Z".into()), boundary_url: None },
-            PageNote { id: "org-b".into(), last_updated: Some("2026-01-03T00:00:00Z".into()), boundary_url: None },
+            PageNote {
+                id: "org-a".into(),
+                last_updated: Some("2026-01-02T00:00:00Z".into()),
+                boundary_url: None,
+            },
+            PageNote {
+                id: "org-b".into(),
+                last_updated: Some("2026-01-03T00:00:00Z".into()),
+                boundary_url: None,
+            },
         ];
         let mut report = Report::default();
         let files = MergeFiles::organizations(&snap);
-        let stats = merge_file(&files, &notes, false, &|_| None, &HashMap::new(), &mut report).unwrap();
+        let stats = merge_file(
+            &files,
+            &notes,
+            false,
+            &|_| None,
+            &HashMap::new(),
+            &mut report,
+        )
+        .unwrap();
         assert_eq!((stats.total, stats.added, stats.updated), (2, 1, 1));
         assert_eq!(stats.watermark.as_deref(), Some("2026-01-03T00:00:00Z"));
         let text = std::fs::read_to_string(snap.organizations()).unwrap();
         assert!(text.contains("\"name\":\"new\""));
         assert!(!text.contains("old"));
-        assert_eq!(std::fs::read_to_string(snap.locations()).unwrap(), "{\"id\":\"loc\"}\n");
+        assert_eq!(
+            std::fs::read_to_string(snap.locations()).unwrap(),
+            "{\"id\":\"loc\"}\n"
+        );
         assert!(!snap.incoming_organizations().exists());
         assert!(!snap.organizations_tmp().exists());
     }

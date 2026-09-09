@@ -325,15 +325,24 @@ fn column(out: &Path, name: &str) -> std::collections::HashMap<String, Option<St
     use arrow_array::cast::AsArray;
     use arrow_array::Array;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let file = std::fs::File::open(out.join("locations/country=NG/geom_type=point/type=facility/part-0.parquet")).unwrap();
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file).unwrap().build().unwrap();
+    let file = std::fs::File::open(
+        out.join("locations/country=NG/geom_type=point/type=facility/part-0.parquet"),
+    )
+    .unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
     let mut got = std::collections::HashMap::new();
     for batch in reader {
         let batch = batch.unwrap();
         let ids = batch.column_by_name("id").unwrap().as_string::<i32>();
         let col = batch.column_by_name(name).unwrap().as_string::<i32>();
         for r in 0..batch.num_rows() {
-            got.insert(ids.value(r).to_string(), (!col.is_null(r)).then(|| col.value(r).to_string()));
+            got.insert(
+                ids.value(r).to_string(),
+                (!col.is_null(r)).then(|| col.value(r).to_string()),
+            );
         }
     }
     got
@@ -361,7 +370,8 @@ fn facility_rows_carry_their_organization() {
     let dir = tempfile::tempdir().unwrap();
     let snap = dir.path().join("snapshot");
     std::fs::create_dir_all(&snap).unwrap();
-    let mut locations = std::fs::read_to_string(fixture_snapshot().join("locations.ndjson")).unwrap();
+    let mut locations =
+        std::fs::read_to_string(fixture_snapshot().join("locations.ndjson")).unwrap();
     locations.push_str(&facility("paired", "org-paired", 3.4));
     locations.push('\n');
     locations.push_str(&facility("lonely", "org-gone", 3.5));
@@ -369,7 +379,11 @@ fn facility_rows_carry_their_organization() {
     std::fs::write(snap.join("locations.ndjson"), locations).unwrap();
     std::fs::write(
         snap.join("organizations.ndjson"),
-        format!("{}\n{}\n", organization("org-paired", "paired"), organization("org-other", "Other")),
+        format!(
+            "{}\n{}\n",
+            organization("org-paired", "paired"),
+            organization("org-other", "Other")
+        ),
     )
     .unwrap();
     let out = dir.path().join("out");
@@ -378,16 +392,32 @@ fn facility_rows_carry_their_organization() {
     let nhfr = column(&out, "nhfr_code");
     assert_eq!(nhfr["paired"].as_deref(), Some("05/08/1"));
     assert_eq!(nhfr["lonely"], None);
-    assert_eq!(nhfr["clinic"], None, "a facility with no managingOrganization");
-    assert_eq!(column(&out, "facility_level_text")["paired"].as_deref(), Some("Health Post"));
-    assert_eq!(column(&out, "ownership_text")["paired"].as_deref(), Some("Local Government"));
-    assert!(column(&out, "organization_json")["paired"].as_deref().unwrap().contains("\"id\":\"org-paired\""));
+    assert_eq!(
+        nhfr["clinic"], None,
+        "a facility with no managingOrganization"
+    );
+    assert_eq!(
+        column(&out, "facility_level_text")["paired"].as_deref(),
+        Some("Health Post")
+    );
+    assert_eq!(
+        column(&out, "ownership_text")["paired"].as_deref(),
+        Some("Local Government")
+    );
+    assert!(column(&out, "organization_json")["paired"]
+        .as_deref()
+        .unwrap()
+        .contains("\"id\":\"org-paired\""));
     let counts = report_counts(&out);
     assert_eq!(counts["organization_missing"], 1);
     assert!(counts.get("organization_name_mismatch").is_none());
 
     // A renamed Organization is drift, reported once.
-    std::fs::write(snap.join("organizations.ndjson"), format!("{}\n", organization("org-paired", "Renamed"))).unwrap();
+    std::fs::write(
+        snap.join("organizations.ndjson"),
+        format!("{}\n", organization("org-paired", "Renamed")),
+    )
+    .unwrap();
     transform_into(&snap, &out);
     assert_eq!(report_counts(&out)["organization_name_mismatch"], 1);
 

@@ -178,16 +178,28 @@ mod tests {
 
     #[test]
     fn text_columns_coerce_and_empty_string_clears() {
-        assert_eq!(column_from_json("name", &json!("Gama")), Ok(ColumnValue::Text("Gama".into())));
+        assert_eq!(
+            column_from_json("name", &json!("Gama")),
+            Ok(ColumnValue::Text("Gama".into()))
+        );
         assert_eq!(column_from_json("name", &json!("")), Ok(ColumnValue::Null));
-        assert_eq!(column_from_json("name", &json!(null)), Ok(ColumnValue::Null));
+        assert_eq!(
+            column_from_json("name", &json!(null)),
+            Ok(ColumnValue::Null)
+        );
         assert!(column_from_json("name", &json!(5)).is_err());
     }
 
     #[test]
     fn number_columns_accept_numbers_and_numeric_strings() {
-        assert_eq!(column_from_json("position_longitude", &json!(3.25)), Ok(ColumnValue::Number(3.25)));
-        assert_eq!(column_from_json("position_latitude", &json!("6.25")), Ok(ColumnValue::Number(6.25)));
+        assert_eq!(
+            column_from_json("position_longitude", &json!(3.25)),
+            Ok(ColumnValue::Number(3.25))
+        );
+        assert_eq!(
+            column_from_json("position_latitude", &json!("6.25")),
+            Ok(ColumnValue::Number(6.25))
+        );
         assert!(column_from_json("position_latitude", &json!("north")).is_err());
         assert!(column_from_json("position_latitude", &json!(true)).is_err());
     }
@@ -205,12 +217,21 @@ mod tests {
     #[test]
     fn identifier_accepts_objects_or_a_json_string_of_them() {
         let want = Ok(ColumnValue::Identifiers(vec![
-            Identifier { system: Some("s".into()), value: Some("v".into()) },
-            Identifier { system: None, value: Some("w".into()) },
+            Identifier {
+                system: Some("s".into()),
+                value: Some("v".into()),
+            },
+            Identifier {
+                system: None,
+                value: Some("w".into()),
+            },
         ]));
         let list = json!([{"system": "s", "value": "v"}, {"value": "w"}]);
         assert_eq!(column_from_json("identifier", &list), want);
-        assert_eq!(column_from_json("identifier", &json!(list.to_string())), want);
+        assert_eq!(
+            column_from_json("identifier", &json!(list.to_string())),
+            want
+        );
         assert_eq!(column_from_json("organization_identifier", &list), want);
         assert!(column_from_json("identifier", &json!(["s|v"])).is_err());
     }

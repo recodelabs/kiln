@@ -99,8 +99,15 @@ mod tests {
         let cap = capability(&[("Location", Some(false))]);
         assert!(check_update_create(&cap, &[]).unwrap().is_empty());
         let err = check_update_create(&cap, &["Location".to_string()]).unwrap_err();
-        assert!(matches!(&err, KilnError::Usage(m) if m.contains("updateCreate") && m.contains("Location")), "{err}");
-        let ok = check_update_create(&capability(&[("Location", Some(true))]), &["Location".to_string()]).unwrap();
+        assert!(
+            matches!(&err, KilnError::Usage(m) if m.contains("updateCreate") && m.contains("Location")),
+            "{err}"
+        );
+        let ok = check_update_create(
+            &capability(&[("Location", Some(true))]),
+            &["Location".to_string()],
+        )
+        .unwrap();
         assert!(ok.is_empty());
     }
 
@@ -108,10 +115,15 @@ mod tests {
     fn an_unstated_flag_is_reported_not_refused() {
         // HAPI FHIR: supports update-as-create, omits the element entirely.
         let cap = capability(&[("Location", None)]);
-        let unstated = check_update_create(&cap, &["Location".to_string(), "Location".to_string()]).unwrap();
+        let unstated =
+            check_update_create(&cap, &["Location".to_string(), "Location".to_string()]).unwrap();
         assert_eq!(unstated, vec!["Location".to_string()]);
         // A type the statement does not list at all is unstated too.
-        let unstated = check_update_create(&json!({"resourceType": "CapabilityStatement"}), &["Organization".to_string()]).unwrap();
+        let unstated = check_update_create(
+            &json!({"resourceType": "CapabilityStatement"}),
+            &["Organization".to_string()],
+        )
+        .unwrap();
         assert_eq!(unstated, vec!["Organization".to_string()]);
     }
 }

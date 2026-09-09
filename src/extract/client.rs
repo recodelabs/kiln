@@ -400,13 +400,21 @@ mod tests {
             Expectation::matching(all_of![
                 request::method_path("POST", "/fhir"),
                 request::headers(contains(("content-type", "application/fhir+json"))),
-                request::body(json_decoded(eq(serde_json::json!({"resourceType": "Bundle"})))),
+                request::body(json_decoded(eq(
+                    serde_json::json!({"resourceType": "Bundle"})
+                ))),
             ])
             .times(2)
-            .respond_with(cycle![status_code(503), status_code(200).body(r#"{"ok":true}"#)]),
+            .respond_with(cycle![
+                status_code(503),
+                status_code(200).body(r#"{"ok":true}"#)
+            ]),
         );
         let got = client(3)
-            .post_json(&server.url("/fhir").to_string(), br#"{"resourceType":"Bundle"}"#.to_vec())
+            .post_json(
+                &server.url("/fhir").to_string(),
+                br#"{"resourceType":"Bundle"}"#.to_vec(),
+            )
             .unwrap();
         assert_eq!(got.body, br#"{"ok":true}"#);
     }
@@ -424,8 +432,18 @@ mod tests {
                 .respond_with(status_code(412).body("version conflict")),
         );
         let c = client(3);
-        assert_eq!(c.post_json(&server.url("/created").to_string(), b"{}".to_vec()).unwrap().body, b"made");
-        let err = c.post_json(&server.url("/stale").to_string(), b"{}".to_vec()).unwrap_err();
-        assert!(matches!(err, FetchError::Status { status: 412, ref body } if body == "version conflict"), "{err:?}");
+        assert_eq!(
+            c.post_json(&server.url("/created").to_string(), b"{}".to_vec())
+                .unwrap()
+                .body,
+            b"made"
+        );
+        let err = c
+            .post_json(&server.url("/stale").to_string(), b"{}".to_vec())
+            .unwrap_err();
+        assert!(
+            matches!(err, FetchError::Status { status: 412, ref body } if body == "version conflict"),
+            "{err:?}"
+        );
     }
 }
