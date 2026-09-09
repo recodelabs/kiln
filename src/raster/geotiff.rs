@@ -44,6 +44,15 @@ impl GeoTiff {
     pub fn open(bytes: Vec<u8>, label: &str) -> Result<GeoTiff> {
         let mut decoder = Decoder::new(Cursor::new(bytes)).map_err(|e| tiff_err(label, e))?;
         let (width, height) = decoder.dimensions().map_err(|e| tiff_err(label, e))?;
+        let samples = decoder
+            .find_tag_unsigned::<u16>(Tag::SamplesPerPixel)
+            .map_err(|e| tiff_err(label, e))?
+            .unwrap_or(1);
+        if samples != 1 {
+            return Err(KilnError::Usage(format!(
+                "{label}: {samples}-band raster; kiln reads single-band population grids (extract one band first)"
+            )));
+        }
         let transform = geotransform(&mut decoder, label)?;
         check_geokeys(&mut decoder, label)?;
         let nodata = match decoder
@@ -52,7 +61,9 @@ impl GeoTiff {
         {
             Some(v) => {
                 let s = v.into_string().map_err(|e| tiff_err(label, e))?;
-                let s = s.trim_end_matches('\0').trim().to_string();
+                let s = s
+                    .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+                    .to_string();
                 Some(s.parse::<f32>().map_err(|_| {
                     KilnError::Usage(format!("{label}: GDAL_NODATA {s:?} is not a number"))
                 })?)
@@ -60,6 +71,8 @@ impl GeoTiff {
             None => None,
         };
         let tile = decoder.chunk_dimensions();
+        // Load-bearing, not cosmetic: the tiff crate does not reject height
+        // == 0, and its strip arithmetic would divide by zero.
         if tile.0 == 0 || tile.1 == 0 || width == 0 || height == 0 {
             return Err(KilnError::Usage(format!(
                 "{label}: empty raster or tile ({width}×{height}, tiles {}×{})",
@@ -102,10 +115,15 @@ fn geotransform(decoder: &mut Decoder<Cursor<Vec<u8>>>, label: &str) -> Result<G
             "{label}: no ModelPixelScale/ModelTiepoint tags; only north-up GeoTIFFs are supported"
         )));
     };
-    if scale.len() < 2 || tie.len() < 6 {
+    if scale.len() < 2 {
         return Err(KilnError::Usage(format!(
-            "{label}: malformed ModelPixelScale ({} values) or ModelTiepoint ({} values)",
-            scale.len(),
+            "{label}: malformed ModelPixelScale ({} values)",
+            scale.len()
+        )));
+    }
+    if tie.len() != 6 {
+        return Err(KilnError::Usage(format!(
+            "{label}: ModelTiepoint must have exactly 6 values (one tiepoint) when ModelPixelScale is present, got {}",
             tie.len()
         )));
     }
@@ -287,5 +305,108 @@ mod tests {
         let err = GeoTiff::open(b"not a tiff".to_vec(), "x.tif").unwrap_err();
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().starts_with("x.tif:"), "{err}");
+    }
+
+    /// A stripped Float32 GeoTIFF of the MemRaster fixture grid, written by the
+    /// tiff encoder: `rows_per_strip` rows per chunk, the given tiepoint
+    /// (i, j, x, y) and GeoKey directory shorts.
+    fn encoded(rows_per_strip: u32, tiepoint: [f64; 4], geokeys: &[u16]) -> Vec<u8> {
+        use tiff::encoder::{colortype::Gray32Float, TiffEncoder};
+
+        let m = MemRaster::fixture();
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut tiff = TiffEncoder::new(&mut buf).unwrap();
+            let mut image = tiff.new_image::<Gray32Float>(m.width, m.height).unwrap();
+            image.rows_per_strip(rows_per_strip).unwrap();
+            {
+                let enc = image.encoder();
+                let [i, j, x, y] = tiepoint;
+                enc.write_tag(Tag::ModelPixelScaleTag, &[0.1f64, 0.1, 0.0][..])
+                    .unwrap();
+                enc.write_tag(Tag::ModelTiepointTag, &[i, j, 0.0, x, y, 0.0][..])
+                    .unwrap();
+                enc.write_tag(Tag::GdalNodata, "-99999").unwrap();
+                if !geokeys.is_empty() {
+                    enc.write_tag(Tag::GeoKeyDirectoryTag, geokeys).unwrap();
+                }
+            }
+            image.write_data(&m.data).unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn stripped_tiffs_read_through_the_strip_branch() {
+        let bytes = encoded(8, [0.0, 0.0, 3.0, 7.0], &[]);
+        let mut g = GeoTiff::open(bytes, "stripped.tif").unwrap();
+        assert_eq!(g.tile_size(), (40, 8));
+        assert_eq!((g.tiles_across(), g.tiles_down()), (1, 4));
+
+        let mut m = MemRaster::fixture();
+        m.tile = g.tile_size();
+        let (mut sum, mut n) = (0.0f64, 0u64);
+        for ty in 0..g.tiles_down() {
+            for tx in 0..g.tiles_across() {
+                let t = g.read_tile(tx, ty).unwrap();
+                assert_eq!(t, m.read_tile(tx, ty).unwrap(), "tile ({tx}, {ty})");
+                for &v in &t.data {
+                    if g.is_data(v) {
+                        sum += f64::from(v);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!((sum, n), (1_761_153.0, 1197));
+
+        let err = g.read_tile(0, 4).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_non_zero_tiepoint_is_folded_into_the_origin() {
+        let bytes = encoded(30, [2.0, 3.0, 3.2, 6.7], &[]);
+        let g = GeoTiff::open(bytes, "tiepoint.tif").unwrap();
+        let t = g.transform();
+        assert!((t.x0 - 3.0).abs() < 1e-12, "x0 = {}", t.x0);
+        assert!((t.y0 - 7.0).abs() < 1e-12, "y0 = {}", t.y0);
+    }
+
+    #[test]
+    fn projected_and_pixel_is_point_rasters_are_refused() {
+        let bytes = encoded(30, [0.0, 0.0, 3.0, 7.0], &[1, 1, 0, 1, 1024, 0, 1, 1]);
+        let err = GeoTiff::open(bytes, "x.tif").unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("not a geographic"), "{err}");
+
+        let bytes = encoded(30, [0.0, 0.0, 3.0, 7.0], &[1, 1, 0, 1, 1025, 0, 1, 2]);
+        let err = GeoTiff::open(bytes, "x.tif").unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("PixelIsPoint"), "{err}");
+
+        let bytes = encoded(
+            30,
+            [0.0, 0.0, 3.0, 7.0],
+            &[1, 1, 0, 2, 1024, 0, 1, 2, 1025, 0, 1, 1],
+        );
+        assert!(GeoTiff::open(bytes, "x.tif").is_ok());
+    }
+
+    #[test]
+    fn multi_band_rasters_are_refused() {
+        use tiff::encoder::{colortype::RGB32Float, TiffEncoder};
+
+        let (w, h) = (4u32, 4u32);
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut tiff = TiffEncoder::new(&mut buf).unwrap();
+            let image = tiff.new_image::<RGB32Float>(w, h).unwrap();
+            let data = vec![0.0f32; (w * h * 3) as usize];
+            image.write_data(&data).unwrap();
+        }
+        let err = GeoTiff::open(buf.into_inner(), "rgb.tif").unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("3-band"), "{err}");
     }
 }
