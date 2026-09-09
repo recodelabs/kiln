@@ -88,6 +88,7 @@ pub fn load(
         Err(e) => cache_errors.push(format!("read: {e}")),
     }
     let client = FhirClient::new(None, retries, timeout)?;
+    eprintln!("raster: fetching {label} …");
     let fetched = client
         .get(source)
         .map_err(|e| KilnError::Environment(format!("{source}: {e}")))?;

@@ -13,10 +13,13 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::time::Duration;
 
+use geo::Geometry;
+
 use crate::cli::PopulationArgs;
 use crate::error::{KilnError, Result};
 use crate::fhir::group::{
-    group_id, is_valid_id, target_population_group, TargetPopulation, MAX_ID_LEN, MAX_QUANTITY,
+    group_id, is_valid_id, target_population_group, TargetPopulation, KNOWN_SOURCE_CODES,
+    MAX_ID_LEN, MAX_QUANTITY,
 };
 use crate::fhir::ndjson::LineAccess;
 use crate::fhir::{Boundary, Location};
@@ -26,6 +29,7 @@ use crate::index::{build_index, IndexRecord};
 use crate::raster::fetch;
 use crate::raster::geotiff::GeoTiff;
 use crate::raster::zonal::{raster_total, zonal_sum, ZonalSum};
+use crate::raster::Raster;
 use crate::report::Report;
 use crate::snapshot::Snapshot;
 use crate::transform::write_report;
@@ -88,13 +92,18 @@ pub fn roll_up(
 fn measure(
     lines: &mut LineAccess,
     rec: &IndexRecord,
-    raster: &mut GeoTiff,
+    raster: &mut impl Raster,
     report: &mut Report,
 ) -> Result<Option<ZonalSum>> {
     let text = lines.read_at(rec.offset, rec.len)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let mut scratch = Report::default();
     let Some(loc) = Location::parse(&value, &mut scratch) else {
+        report.add(
+            "no_boundary",
+            &rec.id,
+            "resource did not parse as a Location; no population measured",
+        );
         return Ok(None);
     };
     let geom = match &loc.boundary {
@@ -129,18 +138,18 @@ fn measure(
     let Some(geom) = geom else {
         return Ok(None);
     };
-    match zonal_sum(raster, &geom) {
-        Ok(z) => Ok(Some(z)),
-        Err(KilnError::Usage(msg)) => {
-            report.add(
-                "no_boundary",
-                &loc.id,
-                &format!("{msg}; no population measured"),
-            );
-            Ok(None)
-        }
-        Err(e) => Err(e),
+    // GeoTiff::read_tile also classifies decode failures as Usage; check the
+    // geometry's own type here rather than matching on zonal_sum's error, so
+    // a corrupt raster is never mislabeled as `no_boundary`.
+    if !matches!(geom, Geometry::Polygon(_) | Geometry::MultiPolygon(_)) {
+        report.add(
+            "no_boundary",
+            &loc.id,
+            "boundary is not a Polygon or MultiPolygon; no population measured",
+        );
+        return Ok(None);
     }
+    Ok(Some(zonal_sum(raster, &geom)?))
 }
 
 fn valid_source_code(code: &str) -> bool {
@@ -205,6 +214,13 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
 
     let index = build_index(&ndjson, None)?;
     let mut report = index.report;
+    if !KNOWN_SOURCE_CODES.contains(&args.source.as_str()) {
+        report.add(
+            "unknown_source_code",
+            &args.source,
+            "not a code in icr-denominator-source-cs; written as given (extensible binding)",
+        );
+    }
     let level = i8::try_from(args.level)
         .map_err(|_| KilnError::Usage(format!("--level {} is out of range", args.level)))?;
     let targets: Vec<usize> = (0..index.records.len())
@@ -219,9 +235,6 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
     }
 
     let cache_dir = args.cache_dir.clone().unwrap_or_else(|| snapshot.rasters());
-    if fetch::is_url(&args.raster) {
-        eprintln!("raster: fetching {}", args.raster);
-    }
     let loaded = fetch::load(
         &args.raster,
         &cache_dir,
@@ -231,7 +244,7 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
     for e in &loaded.cache_errors {
         report.add("cache_error", &args.raster, e);
     }
-    println!(
+    eprintln!(
         "Raster {} ({:.1} MB{})",
         loaded.label,
         loaded.bytes.len() as f64 / 1e6,
@@ -244,6 +257,12 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
     let mut totals: BTreeMap<usize, UnitTotal> = BTreeMap::new();
     for &i in &targets {
         let measured = measure(&mut lines, &index.records[i], &mut raster, &mut report)?;
+        // Round once at the leaf so every ancestor's published count is
+        // exactly the sum of its published descendants.
+        let measured = measured.map(|z| ZonalSum {
+            sum: z.sum.round(),
+            pixels: z.pixels,
+        });
         if let Some(z) = measured {
             totals.insert(
                 i,
@@ -256,6 +275,14 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             );
         }
         roll_up(&mut totals, &index.hierarchy, i, measured);
+    }
+
+    let measured_any = totals.values().any(|t| !t.calculated && t.pixels > 0);
+    if !measured_any {
+        return Err(KilnError::Usage(format!(
+            "no admin unit at level {} has a raster pixel centre inside it (raster total {:.0}); is {} the right raster for this snapshot?",
+            args.level, grand.sum, loaded.label
+        )));
     }
 
     let source_text = format!(
@@ -354,6 +381,20 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
         "Raster total {:.0}; assigned to level-{} units {:.0} ({share:.1}%)",
         grand.sum, args.level, assigned
     );
+    let other_level_admin_units = (0..index.records.len())
+        .filter(|&i| {
+            index
+                .hierarchy
+                .get(i)
+                .and_then(|f| f.admin_level)
+                .is_some_and(|l| l != level)
+        })
+        .count();
+    if other_level_admin_units > 0 {
+        println!(
+            "{other_level_admin_units} admin units at other levels were not measured directly"
+        );
+    }
     println!("{}", report.summary());
     if let Some(path) = &args.report {
         write_report(path, &report)?;

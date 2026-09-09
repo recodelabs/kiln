@@ -46,6 +46,20 @@ pub fn is_valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
 }
 
+/// Codes in `icr-denominator-source-cs` (extensible binding, so other codes are
+/// allowed but worth a warning).
+pub const KNOWN_SOURCE_CODES: [&str; 9] = [
+    "census",
+    "census-projection",
+    "microcensus",
+    "worldpop",
+    "grid3",
+    "hmis",
+    "govt-estimate",
+    "unknown",
+    "other",
+];
+
 /// Display text for the `icr-denominator-source-cs` codes kiln emits.
 pub fn source_display(code: &str) -> Option<&'static str> {
     match code {
