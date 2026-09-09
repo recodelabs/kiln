@@ -1,3 +1,4 @@
+pub mod group;
 pub mod location;
 pub mod ndjson;
 pub mod organization;
