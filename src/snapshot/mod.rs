@@ -139,18 +139,9 @@ mod tests {
     #[test]
     fn organization_paths_and_optional_state_fields() {
         let s = Snapshot::new(std::path::Path::new("/x"));
-        assert_eq!(
-            s.organizations(),
-            std::path::PathBuf::from("/x/organizations.ndjson")
-        );
-        assert_eq!(
-            s.organizations_tmp(),
-            std::path::PathBuf::from("/x/organizations.ndjson.tmp")
-        );
-        assert_eq!(
-            s.incoming_organizations(),
-            std::path::PathBuf::from("/x/.incoming-organizations.ndjson")
-        );
+        assert_eq!(s.organizations(), std::path::PathBuf::from("/x/organizations.ndjson"));
+        assert_eq!(s.organizations_tmp(), std::path::PathBuf::from("/x/organizations.ndjson.tmp"));
+        assert_eq!(s.incoming_organizations(), std::path::PathBuf::from("/x/.incoming-organizations.ndjson"));
 
         // A plan 2 state file has no organization fields and must still load.
         let old = r#"{"server":"s","watermark":"2026-01-01T00:00:00Z","count":1,"kiln_version":"0.2.0","completed_at":"2026-01-01T00:00:00Z"}"#;
@@ -158,10 +149,7 @@ mod tests {
         assert_eq!(st.organization_watermark, None);
         assert_eq!(st.organization_count, None);
         let text = serde_json::to_string(&st).unwrap();
-        assert!(
-            !text.contains("organization"),
-            "absent fields stay absent: {text}"
-        );
+        assert!(!text.contains("organization"), "absent fields stay absent: {text}");
     }
 
     #[test]
