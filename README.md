@@ -188,6 +188,10 @@ kiln load      --server URL [--token T] --in CHANGES.ndjson
                [--dry-run] [--batch-size 100] [--retries 3] [--timeout SECS]
 kiln index     --snapshot DIR --spatial-index quadkey:18 [--spatial-index geohash:8]
                --out CHANGES.ndjson [--refresh] [--report FILE]
+kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY
+               --out GROUPS.ndjson [--source worldpop] [--planning-denominator]
+               [--estimate-date YYYY-MM-DD] [--report FILE] [--cache-dir DIR]
+               [--retries 3] [--timeout 3600]
 ```
 
 `--token` falls back to `$KILN_TOKEN` and is sent as a bearer token; getting
@@ -469,6 +473,9 @@ The kinds, grouped by where they arise:
 - Dataset: `duplicate_pcode`, `point_outside_parent`, `small_partition`,
   `partition_value_sanitized`, `partition_value_collision`, `row_vanished`
 - Organization pairing: `organization_missing`, `organization_name_mismatch`
+- Population (`kiln population`): `no_boundary`, `no_pixels`, `rollup_incomplete`,
+  `rollup_empty`, `group_id_too_long`, `group_id_invalid`, `quantity_out_of_range`,
+  `cache_error`, `unknown_source_code`
 
 ---
 
@@ -660,6 +667,80 @@ dropped rather than left wrong), and clearing the position removes them all.
 Quadkey and geohash are computed in kiln with no dependency; H3 cells are
 parsed and carried but not computed yet.
 
+### population
+
+```
+kiln population --snapshot DIR --raster PATH_OR_URL --level N --year YYYY --out GROUPS.ndjson
+                [--source worldpop] [--planning-denominator] [--estimate-date YYYY-MM-DD]
+                [--report FILE] [--cache-dir DIR] [--retries 3] [--timeout 3600]
+```
+
+A campaign needs a denominator for every admin unit, and the ICR IG says
+where it lives: not on the Location, but beside it as an
+**`ICRTargetPopulation` Group** — a conceptual cohort (`actual = false`)
+with a head count, scoped to the Location through its `geography`
+characteristic, carrying provenance in extensions (`denominator-source`,
+`denominator-type`, `estimate-date`, `is-calculated`,
+`is-planning-denominator`). `population` produces those Groups from a
+population raster and the boundaries already in the snapshot. It never
+changes a Location.
+
+`--raster` is a GeoTIFF: a local file, or an http(s) URL fetched once into
+`SNAPSHOT/rasters/` (the same content-addressed cache the boundary fetch
+uses; a response that is not a TIFF is refused before it can be cached).
+WorldPop's constrained 100 m grids are the intended input — one band of
+32-bit floats, EPSG:4326, `-99999` nodata, DEFLATE tiles — and any north-up
+lon/lat single-band float GeoTIFF works. A projected raster, a PixelIsPoint
+raster, or a multi-band file is refused with a message saying why. The
+raster is held in memory (100–200 MB for a country), and `--timeout` is the
+whole download's deadline, one hour by default.
+
+`--level N` picks the admin level to **measure**: every admin unit at that
+level is summed against the raster under the *pixel-centroid rule* — a pixel
+belongs to the unit whose polygon contains its centre. That rule makes
+adjacent units a partition of the pixels, so children add up to their parent
+exactly, where "all touched" methods count every shared-boundary pixel twice.
+Each leaf count is rounded once; every admin ancestor of a measured unit then
+gets a **rolled-up** total that is exactly the sum of its published
+descendants, flagged `is-calculated = true`. Units at other levels,
+facilities and other points are not measured; the summary says how many.
+
+The last lines of output are the sanity check: the raster's grand total
+against the sum assigned to the measured units. Expect close to 100%. Well
+under means boundaries that do not cover the country, units missing at that
+level, or the wrong raster — and a run in which *no* unit overlaps the raster
+at all is an error, not an empty file.
+
+Group ids are `pop-SOURCE-YEAR-LOCATIONID`, so a re-run rewrites the same
+resources; `kiln load` sends them as plain `PUT`s (no `ifMatch` — kiln owns
+these Groups outright). Load the Locations first: `load` orders `partOf`
+parents before children but knows nothing about a Group's `geography`
+reference. `--year` names the raster's reference year (it becomes part of
+the id and the default `estimate-date` of `YYYY-01-01`); the IG defines
+`estimate-date` as when the estimate was *made*, which a modelled raster does
+not carry, so pass `--estimate-date` when you know it. `--source` is the
+`denominator-source` code (`worldpop` by default; any code is written, a
+code outside `icr-denominator-source-cs` is reported as
+`unknown_source_code`). `--planning-denominator` marks the written Groups as
+the figures campaigns plan against; the IG expects exactly one planning
+denominator per geography, which kiln cannot check across runs.
+
+Report kinds this command adds: `no_boundary` (a unit at `--level` had no
+usable polygon), `no_pixels` (a polygon with no data-pixel centre inside —
+smaller than a pixel, or outside the raster), `rollup_incomplete` (an
+ancestor whose total under-counts because a descendant was `no_boundary`;
+the Group is still written), `rollup_empty`, `group_id_too_long`,
+`group_id_invalid`, `quantity_out_of_range`, `cache_error`,
+`unknown_source_code`. The report also carries pass one's snapshot-quality
+kinds (`no_geometry` for point-only facilities, `orphan`, `cycle`, …), since
+`population` reads the snapshot with the same index `transform` builds.
+
+What this is not: age–sex bands (WorldPop publishes those as separate
+rasters; run `population` once per raster with a distinct `--source` when
+the IG gains a characteristic for them), coverage-weighted sums, or two
+competing estimates from different rasters for the same source and year —
+their ids collide, and the second load replaces the first.
+
 ### load
 
 ```
@@ -810,7 +891,9 @@ store, or anything else that implements R4.
 **No GDAL, no GEOS, no Python at runtime.** The deployment constraint drives
 this. Everything kiln needs from those libraries turned out to be available
 in pure Rust, at the cost of not offering geometry repair, which kiln did not
-want to offer anyway.
+want to offer anyway. The population raster is read the same way: the
+pure-Rust `tiff` crate decodes WorldPop's DEFLATE tiles, and kiln's own
+scanline fill does the zonal sum.
 
 ---
 
@@ -823,9 +906,12 @@ want to offer anyway.
 - **Merge countries.** One snapshot and one dataset per country. Separate
   outputs can be placed under one directory tree by hand, since the partition
   key includes the country.
-- **Import external data.** Turning a GRID3 ward file or a CSV of facilities
-  into FHIR resources is the job of `bake` and `bake-points`, which remain in
-  the Python package under `python/` for now.
+- **Import external data into Locations.** Turning a GRID3 ward file or a CSV
+  of facilities into FHIR resources is the job of `bake` and `bake-points`,
+  which remain in the Python package under `python/` for now. `kiln
+  population` is the deliberate exception: it derives Groups from the
+  registry's own boundaries and a published raster, and writes nothing onto
+  a Location.
 - **Validate against the profile.** `diff` produces structurally correct
   resources; running them through a FHIR validator before load is the
   operator's call, and the NDJSON checkpoint exists so that is easy.
@@ -867,7 +953,9 @@ out of the way.
 with a spatial or hierarchical shape: `Organization` hierarchies, `Group`
 households with a location, campaign `CarePlan` targets. The snapshot and
 transform machinery is resource agnostic; the column mapping is not, and each
-type would need its own.
+type would need its own. `Group` has a first foothold: `kiln population`
+writes `ICRTargetPopulation` Groups, though it does not yet extract or
+project them.
 
 **Validation hook.** An optional call to a FHIR validator on `diff` output
 before `load`, so profile violations are caught locally rather than by the
@@ -943,9 +1031,13 @@ kiln/
     run.rs
     diff/        input rows from GeoJSON and GeoParquet, resource rebuild, canonical compare
     load/        parents-first ordering, transaction bundles with ifMatch, capability preflight
+    cells.rs     kiln index: spatial-index backfill
+    raster/      GeoTIFF reader (tiff crate), pixel-centroid zonal sum, raster fetch cache
+    population.rs  kiln population: measure admin units, roll up, emit ICRTargetPopulation Groups
   tests/
     fixtures/snapshot/
-    transform.rs, extract.rs, diff.rs, load.rs
+    fixtures/raster/   a 40×30 COG with known sums
+    transform.rs, extract.rs, diff.rs, load.rs, index.rs, population.rs
   python/        the Python package: bake and bake-points (extract and load are superseded by the Rust binary)
   docs/
     superpowers/ design specs, plans, and spikes
