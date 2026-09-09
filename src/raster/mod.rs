@@ -8,7 +8,7 @@ pub mod fetch;
 pub mod geotiff;
 pub mod zonal;
 
-use crate::error::Result;
+use crate::error::{KilnError, Result};
 
 /// Affine georeferencing for a north-up raster. Pixel (col, row) covers
 /// lon [x0 + col·px, x0 + (col+1)·px) and lat (y0 − (row+1)·py, y0 − row·py].
@@ -23,6 +23,22 @@ pub struct GeoTransform {
 }
 
 impl GeoTransform {
+    /// Rejects what `col_of`/`row_of` cannot represent: non-finite values, or a
+    /// zero/negative pixel size (a negative `py` would silently flip north and south).
+    pub fn new(x0: f64, y0: f64, px: f64, py: f64) -> Result<GeoTransform> {
+        if ![x0, y0, px, py].iter().all(|v| v.is_finite()) {
+            return Err(KilnError::Usage(format!(
+                "geotransform has a non-finite value: origin ({x0}, {y0}), pixel ({px}, {py})"
+            )));
+        }
+        if !(px > 0.0 && py > 0.0) {
+            return Err(KilnError::Usage(format!(
+                "pixel size must be positive, got ({px}, {py})"
+            )));
+        }
+        Ok(GeoTransform { x0, y0, px, py })
+    }
+
     /// Fractional column of a longitude: 0.0 is the left edge of column 0.
     pub fn col_of(&self, lon: f64) -> f64 {
         (lon - self.x0) / self.px
@@ -52,28 +68,34 @@ pub struct Tile {
 pub trait Raster {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
-    fn transform(&self) -> &GeoTransform;
+    fn transform(&self) -> GeoTransform;
     fn nodata(&self) -> Option<f32>;
     /// Nominal (tile_width, tile_height). For a stripped TIFF this is
     /// (width, rows_per_strip).
     fn tile_size(&self) -> (u32, u32);
-    /// Decode the chunk at tile column `tx`, tile row `ty`.
+    /// Decode the chunk at tile column `tx`, tile row `ty`. `tx` must be
+    /// `< tiles_across()` and `ty < tiles_down()`; implementations return
+    /// `KilnError::Usage` otherwise, never panic.
     fn read_tile(&mut self, tx: u32, ty: u32) -> Result<Tile>;
 
     fn tiles_across(&self) -> u32 {
-        self.width().div_ceil(self.tile_size().0)
+        self.width().div_ceil(self.tile_size().0.max(1))
     }
     fn tiles_down(&self) -> u32 {
-        self.height().div_ceil(self.tile_size().1)
+        self.height().div_ceil(self.tile_size().1.max(1))
     }
     /// True for a value that carries data: finite and not the nodata marker.
     fn is_data(&self, v: f32) -> bool {
-        v.is_finite()
-            && match self.nodata() {
-                Some(nd) => v != nd,
-                None => true,
-            }
+        is_data(v, self.nodata())
     }
+}
+
+/// True for a value that carries data: finite and not the nodata marker.
+/// Exact `f32` equality on purpose: callers must parse the file's nodata to
+/// `f32` so it matches the stored samples; a NaN nodata is covered by the
+/// finiteness check.
+pub fn is_data(v: f32, nodata: Option<f32>) -> bool {
+    v.is_finite() && nodata.is_none_or(|nd| v != nd)
 }
 
 /// In-memory raster for tests: the whole grid in one Vec, tiled on demand.
@@ -129,8 +151,8 @@ impl Raster for MemRaster {
     fn height(&self) -> u32 {
         self.height
     }
-    fn transform(&self) -> &GeoTransform {
-        &self.transform
+    fn transform(&self) -> GeoTransform {
+        self.transform
     }
     fn nodata(&self) -> Option<f32> {
         self.nodata
@@ -139,6 +161,11 @@ impl Raster for MemRaster {
         self.tile
     }
     fn read_tile(&mut self, tx: u32, ty: u32) -> Result<Tile> {
+        if tx >= self.tiles_across() || ty >= self.tiles_down() {
+            return Err(KilnError::Usage(format!(
+                "tile ({tx}, {ty}) is outside the grid"
+            )));
+        }
         let (tw, th) = self.tile;
         let (c0, r0) = (tx * tw, ty * th);
         let w = tw.min(self.width - c0);
@@ -196,5 +223,68 @@ mod tests {
         assert!(!r.is_data(-99999.0));
         assert!(!r.is_data(f32::NAN));
         assert!(r.is_data(0.0));
+        assert!(r.read_tile(3, 0).is_err());
+        assert!(r.read_tile(0, 2).is_err());
+    }
+
+    #[test]
+    fn new_rejects_non_finite_and_non_positive_pixel_sizes() {
+        assert_eq!(
+            GeoTransform::new(f64::NAN, 7.0, 0.1, 0.1)
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert_eq!(
+            GeoTransform::new(3.0, 7.0, 0.0, 0.1)
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert_eq!(
+            GeoTransform::new(3.0, 7.0, 0.1, -0.1)
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert!(GeoTransform::new(3.0, 7.0, 0.1, 0.1).is_ok());
+    }
+
+    #[test]
+    fn pixel_edges_are_left_and_top_closed() {
+        // Tolerance, not exact equality: (3.1 - 3.0) / 0.1 lands a few ULPs
+        // off 1.0 under IEEE-754 arithmetic.
+        assert!(
+            (T.col_of(3.1) - 1.0).abs() < 1e-9,
+            "lon 3.1 is the left edge of column 1"
+        );
+        assert!(
+            (T.row_of(6.9) - 1.0).abs() < 1e-9,
+            "lat 6.9 is the top edge of row 1"
+        );
+    }
+
+    #[test]
+    fn a_pixel_centre_maps_back_to_its_own_pixel() {
+        for (c, r) in [(0u32, 0u32), (39, 0), (0, 29), (39, 29), (17, 11)] {
+            assert_eq!(T.col_of(T.lon_center(c)).floor() as u32, c);
+            assert_eq!(T.row_of(T.lat_center(r)).floor() as u32, r);
+        }
+    }
+
+    #[test]
+    fn southern_hemisphere_rows_still_run_north_to_south() {
+        let s = GeoTransform::new(30.0, -1.0, 0.5, 0.5).unwrap();
+        assert!((s.lat_center(0) - (-1.25)).abs() < 1e-12);
+        assert!((s.lat_center(3) - (-2.75)).abs() < 1e-12);
+        assert_eq!(s.row_of(-2.0), 2.0);
+    }
+
+    #[test]
+    fn without_a_nodata_marker_every_finite_value_is_data() {
+        assert!(is_data(-99999.0, None));
+        assert!(is_data(0.0, None));
+        assert!(!is_data(f32::INFINITY, None));
+        assert!(!is_data(f32::NAN, Some(f32::NAN)));
     }
 }
