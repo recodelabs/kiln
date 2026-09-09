@@ -8,6 +8,7 @@ mod geometry;
 mod index;
 mod inspect;
 mod load;
+mod raster;
 mod report;
 mod run;
 mod snapshot;
