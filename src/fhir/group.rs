@@ -15,8 +15,6 @@ pub const GROUP_CHARACTERISTIC_SYSTEM: &str =
     "https://icr.healthcampaigns.org/CodeSystem/icr-group-characteristic-cs";
 pub const DENOMINATOR_SOURCE_SYSTEM: &str =
     "https://icr.healthcampaigns.org/CodeSystem/icr-denominator-source-cs";
-pub const DENOMINATOR_TYPE_SYSTEM: &str =
-    "https://icr.healthcampaigns.org/CodeSystem/icr-denominator-type-cs";
 pub const DENOMINATOR_SOURCE_EXTENSION_URL: &str =
     "https://icr.healthcampaigns.org/StructureDefinition/denominator-source";
 pub const DENOMINATOR_TYPE_EXTENSION_URL: &str =
@@ -81,8 +79,8 @@ pub fn target_population_group(p: &TargetPopulation) -> Value {
         "extension": [
             {"url": DENOMINATOR_SOURCE_EXTENSION_URL,
              "valueCodeableConcept": {"coding": [coding], "text": p.source_text}},
-            {"url": DENOMINATOR_TYPE_EXTENSION_URL,
-             "valueCodeableConcept": {"coding": [{"system": DENOMINATOR_TYPE_SYSTEM, "code": "total-population", "display": "Total population"}]}},
+            // denominator-type is a bare code in the IG (value[x] only code), unlike denominator-source.
+            {"url": DENOMINATOR_TYPE_EXTENSION_URL, "valueCode": "total-population"},
             {"url": ESTIMATE_DATE_EXTENSION_URL, "valueDate": format!("{:04}-01-01", p.year)},
             {"url": IS_CALCULATED_EXTENSION_URL, "valueBoolean": p.calculated},
         ]
@@ -159,8 +157,7 @@ mod tests {
             .unwrap()
             .contains("nga_pop_2026"));
         assert_eq!(
-            ext(&g, DENOMINATOR_TYPE_EXTENSION_URL).unwrap()["valueCodeableConcept"]["coding"][0]
-                ["code"],
+            ext(&g, DENOMINATOR_TYPE_EXTENSION_URL).unwrap()["valueCode"],
             "total-population"
         );
         assert_eq!(
