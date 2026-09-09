@@ -10,6 +10,13 @@
 //! time; only the tiles the row's spans touch are decoded, and at most one
 //! tile row is held in memory.
 //!
+//! Ties: a pixel centre exactly on a boundary belongs to the polygon on its
+//! east (larger longitude) and its north (larger latitude) side — min-closed,
+//! max-open in both axes — so a shared edge is never claimed twice. Even-odd
+//! runs across every ring of a MultiPolygon at once, so genuinely
+//! self-overlapping parts cancel rather than double-count; that is the safer
+//! failure and what makes winding order irrelevant.
+//!
 //! Negative values are data (they are counted) but contribute nothing to the
 //! sum: a population grid's resampling can leave small negatives, and a head
 //! count must never be reduced by them.
@@ -71,7 +78,7 @@ fn crossings(rings: &[&LineString<f64>], lat: f64, out: &mut Vec<f64>) {
             j = i;
         }
     }
-    out.sort_by(|p, q| p.partial_cmp(q).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_unstable_by(f64::total_cmp);
 }
 
 /// Inclusive column range whose centres lie in [xa, xb), clipped to the raster.
@@ -82,6 +89,10 @@ fn columns(t: &GeoTransform, width: u32, xa: f64, xb: f64) -> Option<(u32, u32)>
 }
 
 /// Sum of the raster's data pixels whose centres fall inside `geom`.
+///
+/// `geom` must be in the raster's coordinate system (kiln's boundaries are
+/// WGS84 GeoJSON and `GeoTiff` refuses projected rasters, so this holds by
+/// construction).
 pub fn zonal_sum(raster: &mut impl Raster, geom: &Geometry<f64>) -> Result<ZonalSum> {
     let rings = rings_of(geom)
         .ok_or_else(|| KilnError::Usage("zonal sum needs a Polygon or MultiPolygon".to_string()))?;
@@ -92,9 +103,13 @@ pub fn zonal_sum(raster: &mut impl Raster, geom: &Geometry<f64>) -> Result<Zonal
     let (tw, th) = raster.tile_size();
     let width = raster.width();
     let nodata = raster.nodata();
-    // Rows whose centres lie within the bbox, clipped to the raster.
-    let r0 = (t.row_of(rect.max().y) - 0.5).ceil().max(0.0);
-    let r1 = (t.row_of(rect.min().y) - 0.5)
+    // Rows whose centres could lie within the bbox, clipped to the raster,
+    // with a row of slack on each side: `row_of` and `lat_center` are
+    // different expressions, so a boundary within an ULP of a row centre can
+    // disagree between them. The prefilter must never exclude a row the
+    // even-odd fill would claim; an extra empty row costs one `crossings` call.
+    let r0 = (t.row_of(rect.max().y) - 1.5).ceil().max(0.0);
+    let r1 = (t.row_of(rect.min().y) + 0.5)
         .floor()
         .min(f64::from(raster.height()) - 1.0);
     if r1 < r0 {
@@ -235,6 +250,52 @@ mod tests {
         m.data[1] = -2.0;
         let z = zonal_sum(&mut m, &boxed(3.0, 4.0, 7.0, 7.0)).unwrap();
         assert_eq!((z.sum, z.pixels), (1_761_151.0, 1197));
+    }
+
+    #[test]
+    fn a_split_exactly_on_a_row_centre_loses_nothing() {
+        // lat 6.95 is row 0's centre. Row 0 belongs to the northern polygon (min-closed).
+        let top = sum(&boxed(3.0, 6.95, 7.0, 7.0));
+        let bottom = sum(&boxed(3.0, 4.0, 7.0, 6.95));
+        assert_eq!(top, (819.0, 39));
+        assert_eq!(bottom, (1_760_334.0, 1158));
+        assert_eq!(top.0 + bottom.0, 1_761_153.0);
+    }
+
+    #[test]
+    fn a_split_exactly_on_a_column_centre_assigns_the_column_east() {
+        // lon 3.05 is column 0's centre: [xa, xb) gives it to the eastern polygon.
+        assert_eq!(sum(&boxed(3.0, 4.0, 3.05, 7.0)), (0.0, 0));
+        assert_eq!(sum(&boxed(3.05, 4.0, 7.0, 7.0)), (1_761_153.0, 1197));
+    }
+
+    #[test]
+    fn a_vertex_on_the_scanline_is_counted_once() {
+        // Diamond with its top and bottom vertices exactly on row centres (6.95, 6.75)
+        // and its side vertices on the 6.85 centre: local max, monotone pass, local min.
+        let diamond = Geometry::Polygon(
+            polygon![(x: 3.5, y: 6.95), (x: 3.6, y: 6.85), (x: 3.5, y: 6.75), (x: 3.4, y: 6.85), (x: 3.5, y: 6.95)],
+        );
+        assert_eq!(sum(&diamond), (211.0, 2));
+    }
+
+    #[test]
+    fn degenerate_rings_are_empty_not_a_panic() {
+        let point_ring =
+            Geometry::Polygon(polygon![(x: 3.5, y: 6.5), (x: 3.5, y: 6.5), (x: 3.5, y: 6.5)]);
+        let collinear = Geometry::Polygon(
+            polygon![(x: 3.0, y: 6.5), (x: 5.0, y: 6.5), (x: 7.0, y: 6.5), (x: 3.0, y: 6.5)],
+        );
+        let empty = Geometry::Polygon(geo::Polygon::new(LineString::new(vec![]), vec![]));
+        for g in [point_ring, collinear, empty] {
+            assert_eq!(sum(&g), (0.0, 0));
+        }
+    }
+
+    #[test]
+    fn a_polygon_hanging_off_the_north_west_edge_matches_its_clipped_twin() {
+        assert_eq!(sum(&boxed(2.0, 6.4, 3.25, 8.5)), (3_017.0, 11));
+        assert_eq!(sum(&boxed(3.0, 6.4, 3.25, 7.0)), (3_017.0, 11));
     }
 
     #[test]
