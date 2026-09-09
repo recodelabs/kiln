@@ -479,3 +479,46 @@ fn published_quantities_add_up_exactly_with_fractional_pixels() {
     assert_eq!(ng, west + east);
     assert!((ng - 1_765_080).abs() <= 2, "ng = {ng}");
 }
+
+#[test]
+fn a_leaf_whose_group_id_is_too_long_is_skipped_and_its_ancestors_are_flagged() {
+    // `pop-worldpop-2026-` is 18 chars; a 50-char Location id pushes the Group id past 64.
+    let long_id = "e".repeat(50);
+    let dir = tempfile::tempdir().unwrap();
+    write_snapshot(
+        dir.path(),
+        &[
+            admin("ng", "Nigeria", None, Some(&rect(3.0, 4.0, 7.0, 7.0))),
+            admin(
+                "west",
+                "West State",
+                Some("ng"),
+                Some(&rect(3.0, 4.0, 5.0, 7.0)),
+            ),
+            admin(
+                &long_id,
+                "East State",
+                Some("ng"),
+                Some(&rect(5.0, 4.0, 7.0, 7.0)),
+            ),
+        ],
+    );
+    let assert = run(dir.path(), FIXTURE, &["--level", "1"]).success();
+    let out = stdout(&assert);
+    assert!(out.contains("Wrote 2 Groups"), "{out}");
+
+    let gs = groups(dir.path());
+    assert_eq!(gs.len(), 2);
+    let ng = gs
+        .iter()
+        .find(|g| g["id"] == "pop-worldpop-2026-ng")
+        .unwrap();
+    assert_eq!(
+        ng["quantity"], 875793,
+        "the skipped leaf must not inflate its parent"
+    );
+
+    let rep = report(dir.path());
+    assert_eq!(rep["counts"]["group_id_too_long"], 1);
+    assert_eq!(rep["counts"]["rollup_incomplete"], 1);
+}

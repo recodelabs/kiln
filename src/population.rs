@@ -152,6 +152,27 @@ fn measure(
     Ok(Some(zonal_sum(raster, &geom)?))
 }
 
+/// True when the Group id kiln would mint for this Location is a valid FHIR
+/// id; otherwise reports `group_id_too_long` / `group_id_invalid` and returns
+/// false. The prefix `pop-{source}-{year}-` eats into the 64-character limit.
+fn valid_group_id(report: &mut Report, source: &str, year: u16, location_id: &str) -> bool {
+    let id = group_id(source, year, location_id);
+    if is_valid_id(&id) {
+        return true;
+    }
+    let kind = if id.len() > MAX_ID_LEN {
+        "group_id_too_long"
+    } else {
+        "group_id_invalid"
+    };
+    report.add(
+        kind,
+        location_id,
+        &format!("{id:?} is not a valid FHIR id ([A-Za-z0-9.-], 1–64 chars); no Group written"),
+    );
+    false
+}
+
 fn valid_source_code(code: &str) -> bool {
     !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
@@ -263,6 +284,15 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             sum: z.sum.round(),
             pixels: z.pixels,
         });
+        // A leaf whose Group cannot be written must not inflate its ancestors
+        // unflagged: treat it like a missing boundary, so they roll up as
+        // incomplete.
+        let measured = if valid_group_id(&mut report, &args.source, args.year, &index.records[i].id)
+        {
+            measured
+        } else {
+            None
+        };
         if let Some(z) = measured {
             totals.insert(
                 i,
@@ -311,26 +341,16 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             report.add(
                 "rollup_incomplete",
                 &rec.id,
-                "a descendant at the measured level had no usable boundary; this total under-counts",
+                "a descendant at the measured level had no usable boundary or no writable Group; this total under-counts",
             );
         }
-        let id = group_id(&args.source, args.year, &rec.id);
-        if !is_valid_id(&id) {
-            let kind = if id.len() > MAX_ID_LEN {
-                "group_id_too_long"
-            } else {
-                "group_id_invalid"
-            };
-            report.add(
-                kind,
-                &rec.id,
-                &format!(
-                    "{id:?} is not a valid FHIR id ([A-Za-z0-9.-], 1–64 chars); no Group written"
-                ),
-            );
+        // Leaves were validated before roll-up; this catches ancestors.
+        if t.calculated && !valid_group_id(&mut report, &args.source, args.year, &rec.id) {
             continue;
         }
-        let count = t.sum.round();
+        // Leaf sums were rounded once before roll-up and ancestors are sums of
+        // those integers, so `t.sum` is already integral.
+        let count = t.sum;
         if !(count >= 0.0 && count <= MAX_QUANTITY as f64) {
             report.add(
                 "quantity_out_of_range",

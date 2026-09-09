@@ -76,7 +76,7 @@ pub struct PopulationArgs {
     /// Admin level to measure from the raster (0 = country); every admin ancestor gets a rolled-up total
     #[arg(long)]
     pub level: u8,
-    /// Year the raster estimates; becomes each Group's estimate-date and part of its id
+    /// Reference year of the raster; part of each Group's id and the default estimate-date
     #[arg(long)]
     pub year: u16,
     /// Date the estimate was made (YYYY-MM-DD) for the estimate-date extension; defaults to YEAR-01-01, the raster's reference year

@@ -692,8 +692,11 @@ WorldPop's constrained 100 m grids are the intended input — one band of
 32-bit floats, EPSG:4326, `-99999` nodata, DEFLATE tiles — and any north-up
 lon/lat single-band float GeoTIFF works. A projected raster, a PixelIsPoint
 raster, or a multi-band file is refused with a message saying why. The
-raster is held in memory (100–200 MB for a country), and `--timeout` is the
-whole download's deadline, one hour by default.
+raster is held in memory (100–200 MB for a country). `--timeout` is the
+deadline for one download attempt, one hour by default; as with `extract`,
+each retry gets the full timeout again. The cache is keyed on the whole URL
+and has no refresh flag: a raster republished at the same URL keeps being
+served from `SNAPSHOT/rasters/` until that entry is deleted.
 
 `--level N` picks the admin level to **measure**: every admin unit at that
 level is summed against the raster under the *pixel-centroid rule* — a pixel
@@ -702,8 +705,12 @@ adjacent units a partition of the pixels, so children add up to their parent
 exactly, where "all touched" methods count every shared-boundary pixel twice.
 Each leaf count is rounded once; every admin ancestor of a measured unit then
 gets a **rolled-up** total that is exactly the sum of its published
-descendants, flagged `is-calculated = true`. Units at other levels,
-facilities and other points are not measured; the summary says how many.
+descendants, flagged `is-calculated = true`. Admin units at other levels are
+not measured directly and the summary says how many; facilities and other
+points are never counted. A unit the hierarchy pass dropped (a `partOf`
+cycle, or a chain deeper than kiln follows) has no level and is not measured
+either — it shows up only under pass one's own report kinds (`cycle`,
+`too_deep`), so check those when the assigned share is lower than expected.
 
 The last lines of output are the sanity check: the raster's grand total
 against the sum assigned to the measured units. Expect close to 100%. Well
