@@ -29,8 +29,8 @@ where
     F: FnMut(InputRow, &mut Report) -> Result<()>,
 {
     let file = File::open(path).map_err(|e| KilnError::io(path, e))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| KilnError::parquet_at(path, e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| KilnError::parquet_at(path, e))?;
     let geometry_column = geometry_column_name(
         builder.metadata().file_metadata().key_value_metadata(),
         builder.schema(),
@@ -209,7 +209,11 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("name", DataType::Utf8, true),
-            Field::new("alias", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+            Field::new(
+                "alias",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            ),
             Field::new("identifier", DataType::Utf8, true),
             Field::new("position_longitude", DataType::Float64, true),
             Field::new("admin1_name", DataType::Utf8, true),
@@ -221,10 +225,16 @@ mod tests {
                 Arc::new(StringArray::from(vec![Some("clinic"), None])),
                 Arc::new(StringArray::from(vec![Some("Gama Clinic"), Some("x")])),
                 Arc::new(alias.finish()),
-                Arc::new(StringArray::from(vec![Some(r#"[{"system":"s","value":"v"}]"#), None])),
+                Arc::new(StringArray::from(vec![
+                    Some(r#"[{"system":"s","value":"v"}]"#),
+                    None,
+                ])),
                 Arc::new(Float64Array::from(vec![Some(3.25), None])),
                 Arc::new(StringArray::from(vec![Some("Kano"), None])),
-                Arc::new(BinaryArray::from(vec![Some(point.as_slice()), Some(b"junk".as_slice())])),
+                Arc::new(BinaryArray::from(vec![
+                    Some(point.as_slice()),
+                    Some(b"junk".as_slice()),
+                ])),
             ],
         )
         .unwrap();
@@ -254,20 +264,38 @@ mod tests {
         let r = &rows[0];
         assert_eq!(r.id.as_deref(), Some("clinic"));
         assert_eq!(r.line, 1);
-        assert_eq!(r.columns.get("name"), Some(&ColumnValue::Text("Gama Clinic".into())));
-        assert_eq!(r.columns.get("alias"), Some(&ColumnValue::TextList(vec!["GC".into()])));
+        assert_eq!(
+            r.columns.get("name"),
+            Some(&ColumnValue::Text("Gama Clinic".into()))
+        );
+        assert_eq!(
+            r.columns.get("alias"),
+            Some(&ColumnValue::TextList(vec!["GC".into()]))
+        );
         assert_eq!(
             r.columns.get("identifier"),
-            Some(&ColumnValue::Identifiers(vec![Identifier { system: Some("s".into()), value: Some("v".into()) }]))
+            Some(&ColumnValue::Identifiers(vec![Identifier {
+                system: Some("s".into()),
+                value: Some("v".into())
+            }]))
         );
-        assert_eq!(r.columns.get("position_longitude"), Some(&ColumnValue::Number(3.25)));
+        assert_eq!(
+            r.columns.get("position_longitude"),
+            Some(&ColumnValue::Number(3.25))
+        );
         assert!(!r.columns.contains_key("admin1_name"));
-        assert_eq!(r.geometry, Some(geo::Geometry::Point(geo::Point::new(3.25, 6.25))));
+        assert_eq!(
+            r.geometry,
+            Some(geo::Geometry::Point(geo::Point::new(3.25, 6.25)))
+        );
 
         let r = &rows[1];
         assert_eq!(r.id, None);
         assert_eq!(r.columns.get("alias"), Some(&ColumnValue::Null));
-        assert_eq!(r.columns.get("position_longitude"), Some(&ColumnValue::Null));
+        assert_eq!(
+            r.columns.get("position_longitude"),
+            Some(&ColumnValue::Null)
+        );
         assert!(r.geometry.is_none());
         assert_eq!(report.count("geometry_unparseable"), 1);
     }
@@ -278,12 +306,23 @@ mod tests {
     fn snappy_and_lz4_compressed_input_is_readable() {
         use parquet::basic::Compression;
         let dir = tempfile::tempdir().unwrap();
-        for (name, compression) in [("snappy", Compression::SNAPPY), ("lz4", Compression::LZ4_RAW)] {
+        for (name, compression) in [
+            ("snappy", Compression::SNAPPY),
+            ("lz4", Compression::LZ4_RAW),
+        ] {
             let path = dir.path().join(format!("{name}.parquet"));
             let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(StringArray::from(vec![Some("a")]))]).unwrap();
-            let props = WriterProperties::builder().set_compression(compression).build();
-            let mut w = ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, Some(props)).unwrap();
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(StringArray::from(vec![Some("a")]))],
+            )
+            .unwrap();
+            let props = WriterProperties::builder()
+                .set_compression(compression)
+                .build();
+            let mut w =
+                ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, Some(props))
+                    .unwrap();
             w.write(&batch).unwrap();
             w.close().unwrap();
             let mut ids = Vec::new();
@@ -299,11 +338,20 @@ mod tests {
     #[test]
     fn a_file_without_geo_metadata_falls_back_to_a_geometry_column_or_none() {
         let schema = Schema::new(vec![Field::new("geometry", DataType::Binary, true)]);
-        assert_eq!(geometry_column_name(None, &schema).as_deref(), Some("geometry"));
+        assert_eq!(
+            geometry_column_name(None, &schema).as_deref(),
+            Some("geometry")
+        );
         let schema = Schema::new(vec![Field::new("name", DataType::Utf8, true)]);
         assert_eq!(geometry_column_name(None, &schema), None);
-        let kv = vec![KeyValue::new("geo".into(), r#"{"primary_column":"shape"}"#.to_string())];
+        let kv = vec![KeyValue::new(
+            "geo".into(),
+            r#"{"primary_column":"shape"}"#.to_string(),
+        )];
         let schema = Schema::new(vec![Field::new("shape", DataType::Binary, true)]);
-        assert_eq!(geometry_column_name(Some(&kv), &schema).as_deref(), Some("shape"));
+        assert_eq!(
+            geometry_column_name(Some(&kv), &schema).as_deref(),
+            Some("shape")
+        );
     }
 }

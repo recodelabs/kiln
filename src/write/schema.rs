@@ -339,10 +339,14 @@ impl RowBatch {
         self.ownership.append_option(r.ownership.as_deref());
         self.nhfr_code.append_option(r.nhfr_code.as_deref());
         self.nhfr_uid.append_option(r.nhfr_uid.as_deref());
-        push_identifiers(&mut self.organization_identifier, &r.organization_identifier);
+        push_identifiers(
+            &mut self.organization_identifier,
+            &r.organization_identifier,
+        );
         self.facility_level_text
             .append_option(r.facility_level_text.as_deref());
-        self.ownership_text.append_option(r.ownership_text.as_deref());
+        self.ownership_text
+            .append_option(r.ownership_text.as_deref());
         self.depth.append_value(r.depth);
         self.admin_level.append_option(r.admin_level);
         self.tier.append_value(&r.tier);

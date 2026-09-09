@@ -14,8 +14,8 @@ use crate::fhir::location::{
     PCODE_SYSTEMS, SETTLEMENT_TYPE_EXTENSION_URL,
 };
 use crate::fhir::organization::{NHFR_CODE_SYSTEM, NHFR_UID_SYSTEM, ORGANIZATION_TYPE_SYSTEM};
-use crate::fhir::{Boundary, Location};
 use crate::fhir::spatial::{refresh_cells, remove_all_cells};
+use crate::fhir::{Boundary, Location};
 use crate::geometry::{kind_name, parse_boundary, validity};
 use crate::report::Report;
 
@@ -483,7 +483,9 @@ fn apply_geometry(
     }
     match original {
         // Equal to the snapshot after rounding: restore its exact numbers.
-        Some((ox, oy)) if round_coord(ox) == x && round_coord(oy) == y => write_position(obj, ox, oy),
+        Some((ox, oy)) if round_coord(ox) == x && round_coord(oy) == y => {
+            write_position(obj, ox, oy)
+        }
         _ => write_position(obj, x, y),
     }
 }
@@ -632,8 +634,15 @@ mod tests {
         let mut report = Report::default();
         let loc = snapshot_location();
         // Unedited name and status, and a facility level the Location never had: no change.
-        let same = row(&[("name", text("A")), ("status", text("active")), ("facility_level", ColumnValue::Null)]);
-        assert_eq!(rebuild_organization(&org_base(), &same, Some(&loc), &mut report), org_base());
+        let same = row(&[
+            ("name", text("A")),
+            ("status", text("active")),
+            ("facility_level", ColumnValue::Null),
+        ]);
+        assert_eq!(
+            rebuild_organization(&org_base(), &same, Some(&loc), &mut report),
+            org_base()
+        );
         // Edited name and status.
         let edited = row(&[("name", text("B")), ("status", text("inactive"))]);
         let out = rebuild_organization(&org_base(), &edited, Some(&loc), &mut report);
@@ -641,9 +650,17 @@ mod tests {
         assert_eq!(out["active"], false);
         assert_eq!(out["meta"]["versionId"], "9");
         // Facility level edited on the row: the Organization's coding follows.
-        let out = rebuild_organization(&org_base(), &row(&[("facility_level", text("secondary"))]), Some(&loc), &mut report);
+        let out = rebuild_organization(
+            &org_base(),
+            &row(&[("facility_level", text("secondary"))]),
+            Some(&loc),
+            &mut report,
+        );
         assert_eq!(out["type"][1]["coding"][0]["code"], "secondary");
-        assert_eq!(out["type"][1]["text"], "Health Post", "the label is untouched");
+        assert_eq!(
+            out["type"][1]["text"], "Health Post",
+            "the label is untouched"
+        );
     }
 
     #[test]
@@ -657,14 +674,32 @@ mod tests {
             ("ownership_text", text("Private")),
         ]);
         let out = rebuild_organization(&org_base(), &r, Some(&loc), &mut report);
-        assert_eq!(out["identifier"], json!([{"system":NHFR_CODE_SYSTEM,"value":"05/08/2"},{"system":NHFR_UID_SYSTEM,"value":"999"}]));
+        assert_eq!(
+            out["identifier"],
+            json!([{"system":NHFR_CODE_SYSTEM,"value":"05/08/2"},{"system":NHFR_UID_SYSTEM,"value":"999"}])
+        );
         assert_eq!(out["type"][1]["text"], "Clinic");
-        assert_eq!(report.count("input_column_type"), 1, "no ownership coding to label");
-        let out = rebuild_organization(&org_base(), &row(&[("facility_level_text", ColumnValue::Null)]), Some(&loc), &mut report);
+        assert_eq!(
+            report.count("input_column_type"),
+            1,
+            "no ownership coding to label"
+        );
+        let out = rebuild_organization(
+            &org_base(),
+            &row(&[("facility_level_text", ColumnValue::Null)]),
+            Some(&loc),
+            &mut report,
+        );
         assert!(out["type"][1].get("text").is_none());
         let out = rebuild_organization(
             &org_base(),
-            &row(&[("organization_identifier", ColumnValue::Identifiers(vec![Identifier { system: Some("s".into()), value: Some("v".into()) }]))]),
+            &row(&[(
+                "organization_identifier",
+                ColumnValue::Identifiers(vec![Identifier {
+                    system: Some("s".into()),
+                    value: Some("v".into()),
+                }]),
+            )]),
             Some(&loc),
             &mut report,
         );
@@ -674,22 +709,36 @@ mod tests {
     #[test]
     fn a_new_organization_carries_the_pairing_shape() {
         let mut report = Report::default();
-        let r = row(&[("name", text("New Site")), ("facility_level", text("primary")), ("facility_level_text", text("Health Post")), ("nhfr_code", text("05/09"))]);
+        let r = row(&[
+            ("name", text("New Site")),
+            ("facility_level", text("primary")),
+            ("facility_level_text", text("Health Post")),
+            ("nhfr_code", text("05/09")),
+        ]);
         let out = new_organization("org-new", &r, &mut report);
         assert_eq!(out["resourceType"], "Organization");
         assert_eq!(out["id"], "org-new");
         assert_eq!(out["active"], true);
         assert_eq!(out["name"], "New Site");
         assert_eq!(out["type"][0]["coding"][0]["code"], "prov");
-        assert_eq!(out["type"][1], json!({"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"primary"}],"text":"Health Post"}));
-        assert_eq!(out["identifier"], json!([{"system":NHFR_CODE_SYSTEM,"value":"05/09"}]));
+        assert_eq!(
+            out["type"][1],
+            json!({"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"primary"}],"text":"Health Post"})
+        );
+        assert_eq!(
+            out["identifier"],
+            json!([{"system":NHFR_CODE_SYSTEM,"value":"05/09"}])
+        );
         assert!(out.get("meta").is_none());
     }
 
     fn row(cols: &[(&str, ColumnValue)]) -> InputRow {
         InputRow {
             id: Some("a".into()),
-            columns: cols.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            columns: cols
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
             geometry: None,
             line: 1,
         }
@@ -708,7 +757,14 @@ mod tests {
     #[test]
     fn strings_set_and_null_clears_and_unknown_fields_survive() {
         let base = json!({"resourceType":"Location","id":"a","name":"Old","status":"active","meta":{"versionId":"3"},"mystery":{"k":1}});
-        let out = apply(base, &[("name", text("New")), ("status", ColumnValue::Null), ("description", text("d"))]);
+        let out = apply(
+            base,
+            &[
+                ("name", text("New")),
+                ("status", ColumnValue::Null),
+                ("description", text("d")),
+            ],
+        );
         assert_eq!(out["name"], "New");
         assert!(out.get("status").is_none());
         assert_eq!(out["description"], "d");
@@ -723,12 +779,24 @@ mod tests {
             base.clone(),
             &[
                 ("alias", ColumnValue::TextList(vec!["y".into(), "z".into()])),
-                ("identifier", ColumnValue::Identifiers(vec![Identifier { system: Some("u".into()), value: Some("3".into()) }])),
+                (
+                    "identifier",
+                    ColumnValue::Identifiers(vec![Identifier {
+                        system: Some("u".into()),
+                        value: Some("3".into()),
+                    }]),
+                ),
             ],
         );
         assert_eq!(out["alias"], json!(["y", "z"]));
         assert_eq!(out["identifier"], json!([{"system":"u","value":"3"}]));
-        let out = apply(base, &[("alias", ColumnValue::Null), ("identifier", ColumnValue::Null)]);
+        let out = apply(
+            base,
+            &[
+                ("alias", ColumnValue::Null),
+                ("identifier", ColumnValue::Null),
+            ],
+        );
         assert!(out.get("alias").is_none());
         assert!(out.get("identifier").is_none());
     }
@@ -737,18 +805,39 @@ mod tests {
     fn pcode_upserts_into_the_identifier_list_after_it_is_replaced() {
         let base = json!({"resourceType":"Location","id":"a","identifier":[{"system":PCODE_SYSTEM,"value":"OLD"}]});
         let out = apply(base.clone(), &[("pcode", text("NG1"))]);
-        assert_eq!(out["identifier"], json!([{"system":PCODE_SYSTEM,"value":"NG1"}]));
+        assert_eq!(
+            out["identifier"],
+            json!([{"system":PCODE_SYSTEM,"value":"NG1"}])
+        );
         let out = apply(
             base.clone(),
             &[
-                ("identifier", ColumnValue::Identifiers(vec![Identifier { system: Some("s".into()), value: Some("v".into()) }])),
+                (
+                    "identifier",
+                    ColumnValue::Identifiers(vec![Identifier {
+                        system: Some("s".into()),
+                        value: Some("v".into()),
+                    }]),
+                ),
                 ("pcode", text("NG2")),
             ],
         );
-        assert_eq!(out["identifier"], json!([{"system":"s","value":"v"},{"system":PCODE_SYSTEM,"value":"NG2"}]));
-        let out = apply(base, &[("pcode", ColumnValue::Null), ("gers_id", text("g"))]);
-        assert_eq!(out["identifier"], json!([{"system":GERS_SYSTEM,"value":"g"}]));
-        let out = apply(json!({"resourceType":"Location","id":"a"}), &[("gers_id", ColumnValue::Null)]);
+        assert_eq!(
+            out["identifier"],
+            json!([{"system":"s","value":"v"},{"system":PCODE_SYSTEM,"value":"NG2"}])
+        );
+        let out = apply(
+            base,
+            &[("pcode", ColumnValue::Null), ("gers_id", text("g"))],
+        );
+        assert_eq!(
+            out["identifier"],
+            json!([{"system":GERS_SYSTEM,"value":"g"}])
+        );
+        let out = apply(
+            json!({"resourceType":"Location","id":"a"}),
+            &[("gers_id", ColumnValue::Null)],
+        );
         assert!(out.get("identifier").is_none());
     }
 
@@ -765,14 +854,29 @@ mod tests {
     #[test]
     fn references_keep_their_prefix_and_default_to_the_type() {
         let base = json!({"resourceType":"Location","id":"a","partOf":{"reference":"Location/old","display":"Old"},"managingOrganization":{"reference":"http://h/fhir/Organization/o1"}});
-        let out = apply(base, &[("part_of", text("new")), ("managing_organization", text("o2"))]);
+        let out = apply(
+            base,
+            &[
+                ("part_of", text("new")),
+                ("managing_organization", text("o2")),
+            ],
+        );
         assert_eq!(out["partOf"]["reference"], "Location/new");
         assert_eq!(out["partOf"]["display"], "Old");
-        assert_eq!(out["managingOrganization"]["reference"], "http://h/fhir/Organization/o2");
-        let out = apply(json!({"resourceType":"Location","id":"a"}), &[("part_of", text("p")), ("managing_organization", text("o"))]);
+        assert_eq!(
+            out["managingOrganization"]["reference"],
+            "http://h/fhir/Organization/o2"
+        );
+        let out = apply(
+            json!({"resourceType":"Location","id":"a"}),
+            &[("part_of", text("p")), ("managing_organization", text("o"))],
+        );
         assert_eq!(out["partOf"]["reference"], "Location/p");
         assert_eq!(out["managingOrganization"]["reference"], "Organization/o");
-        let out = apply(json!({"resourceType":"Location","id":"a","partOf":{"reference":"Location/p"}}), &[("part_of", ColumnValue::Null)]);
+        let out = apply(
+            json!({"resourceType":"Location","id":"a","partOf":{"reference":"Location/p"}}),
+            &[("part_of", ColumnValue::Null)],
+        );
         assert!(out.get("partOf").is_none());
     }
 
@@ -780,17 +884,29 @@ mod tests {
     fn type_edits_the_first_coding_code_and_keeps_its_system() {
         let base = json!({"resourceType":"Location","id":"a","type":[{"coding":[{"system":"sys","code":"facility"}]},{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc"}]}]});
         let out = apply(base.clone(), &[("type", text("admin-unit"))]);
-        assert_eq!(out["type"][0]["coding"][0], json!({"system":"sys","code":"admin-unit"}));
+        assert_eq!(
+            out["type"][0]["coding"][0],
+            json!({"system":"sys","code":"admin-unit"})
+        );
         assert_eq!(out["type"][1]["coding"][0]["code"], "phc");
-        let out = apply(json!({"resourceType":"Location","id":"a"}), &[("type", text("site"))]);
+        let out = apply(
+            json!({"resourceType":"Location","id":"a"}),
+            &[("type", text("site"))],
+        );
         assert_eq!(out["type"], json!([{"coding":[{"code":"site"}]}]));
         let out = apply(base, &[("type", ColumnValue::Null)]);
-        assert_eq!(out["type"], json!([{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc"}]}]));
+        assert_eq!(
+            out["type"],
+            json!([{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc"}]}])
+        );
     }
 
     #[test]
     fn physical_type_sets_the_first_coding_or_removes_the_concept() {
-        let out = apply(json!({"resourceType":"Location","id":"a"}), &[("physical_type", text("si"))]);
+        let out = apply(
+            json!({"resourceType":"Location","id":"a"}),
+            &[("physical_type", text("si"))],
+        );
         assert_eq!(out["physicalType"], json!({"coding":[{"code":"si"}]}));
         let out = apply(out, &[("physical_type", ColumnValue::Null)]);
         assert!(out.get("physicalType").is_none());
@@ -799,41 +915,108 @@ mod tests {
     #[test]
     fn profile_extensions_upsert_by_url_and_clear() {
         let base = json!({"resourceType":"Location","id":"a","extension":[{"url":"https://example.org/keep","valueString":"k"},{"url":SETTLEMENT_TYPE_EXTENSION_URL,"valueCode":"rural"}]});
-        let out = apply(base, &[("settlement_type", text("urban")), ("delivery_strategy", text("fixed"))]);
+        let out = apply(
+            base,
+            &[
+                ("settlement_type", text("urban")),
+                ("delivery_strategy", text("fixed")),
+            ],
+        );
         assert_eq!(out["extension"][1]["valueCode"], "urban");
-        assert_eq!(out["extension"][2], json!({"url":DELIVERY_STRATEGY_EXTENSION_URL,"valueCode":"fixed"}));
-        let out = apply(out, &[("settlement_type", ColumnValue::Null), ("delivery_strategy", ColumnValue::Null)]);
-        assert_eq!(out["extension"], json!([{"url":"https://example.org/keep","valueString":"k"}]));
-        let out = apply(json!({"resourceType":"Location","id":"a"}), &[("settlement_type", ColumnValue::Null)]);
+        assert_eq!(
+            out["extension"][2],
+            json!({"url":DELIVERY_STRATEGY_EXTENSION_URL,"valueCode":"fixed"})
+        );
+        let out = apply(
+            out,
+            &[
+                ("settlement_type", ColumnValue::Null),
+                ("delivery_strategy", ColumnValue::Null),
+            ],
+        );
+        assert_eq!(
+            out["extension"],
+            json!([{"url":"https://example.org/keep","valueString":"k"}])
+        );
+        let out = apply(
+            json!({"resourceType":"Location","id":"a"}),
+            &[("settlement_type", ColumnValue::Null)],
+        );
         assert!(out.get("extension").is_none());
     }
 
     #[test]
     fn facility_level_and_ownership_upsert_codings_by_system() {
         let base = json!({"resourceType":"Location","id":"a","type":[{"coding":[{"code":"facility"}]},{"coding":[{"system":FACILITY_TYPE_SYSTEM,"code":"phc"}]}]});
-        let out = apply(base, &[("facility_level", text("hospital")), ("ownership", text("public"))]);
+        let out = apply(
+            base,
+            &[
+                ("facility_level", text("hospital")),
+                ("ownership", text("public")),
+            ],
+        );
         assert_eq!(out["type"][1]["coding"][0]["code"], "hospital");
-        assert_eq!(out["type"][2], json!({"coding":[{"system":OWNERSHIP_SYSTEM,"code":"public"}]}));
-        let out = apply(out, &[("facility_level", ColumnValue::Null), ("ownership", ColumnValue::Null)]);
+        assert_eq!(
+            out["type"][2],
+            json!({"coding":[{"system":OWNERSHIP_SYSTEM,"code":"public"}]})
+        );
+        let out = apply(
+            out,
+            &[
+                ("facility_level", ColumnValue::Null),
+                ("ownership", ColumnValue::Null),
+            ],
+        );
         assert_eq!(out["type"], json!([{"coding":[{"code":"facility"}]}]));
     }
 
     #[test]
     fn position_columns_set_clear_and_ignore_float_noise() {
         let base = json!({"resourceType":"Location","id":"a","position":{"longitude":3.25,"latitude":6.25}});
-        let out = apply(base.clone(), &[("position_longitude", ColumnValue::Number(3.250000004)), ("position_latitude", ColumnValue::Number(6.25))]);
+        let out = apply(
+            base.clone(),
+            &[
+                ("position_longitude", ColumnValue::Number(3.250000004)),
+                ("position_latitude", ColumnValue::Number(6.25)),
+            ],
+        );
         assert_eq!(out["position"], json!({"longitude":3.25,"latitude":6.25}));
-        let out = apply(base.clone(), &[("position_longitude", ColumnValue::Number(4.123456789))]);
-        assert_eq!(out["position"], json!({"longitude":4.1234568,"latitude":6.25}));
-        let out = apply(base.clone(), &[("position_longitude", ColumnValue::Null), ("position_latitude", ColumnValue::Null)]);
+        let out = apply(
+            base.clone(),
+            &[("position_longitude", ColumnValue::Number(4.123456789))],
+        );
+        assert_eq!(
+            out["position"],
+            json!({"longitude":4.1234568,"latitude":6.25})
+        );
+        let out = apply(
+            base.clone(),
+            &[
+                ("position_longitude", ColumnValue::Null),
+                ("position_latitude", ColumnValue::Null),
+            ],
+        );
         assert!(out.get("position").is_none());
 
         let mut report = Report::default();
         let bare = json!({"resourceType":"Location","id":"a"});
-        let out = rebuild(&bare, None, &row(&[("position_longitude", ColumnValue::Number(1.0))]), &mut report);
+        let out = rebuild(
+            &bare,
+            None,
+            &row(&[("position_longitude", ColumnValue::Number(1.0))]),
+            &mut report,
+        );
         assert!(out.get("position").is_none());
         assert_eq!(report.count("input_column_type"), 1);
-        let out = rebuild(&bare, None, &row(&[("position_longitude", ColumnValue::Number(1.0)), ("position_latitude", ColumnValue::Number(2.0))]), &mut report);
+        let out = rebuild(
+            &bare,
+            None,
+            &row(&[
+                ("position_longitude", ColumnValue::Number(1.0)),
+                ("position_latitude", ColumnValue::Number(2.0)),
+            ]),
+            &mut report,
+        );
         assert_eq!(out["position"], json!({"longitude":1.0,"latitude":2.0}));
     }
 
@@ -847,8 +1030,15 @@ mod tests {
     }
 
     fn decoded_boundary(out: &Value) -> Value {
-        let ext = out["extension"].as_array().unwrap().iter().find(|e| BOUNDARY_EXTENSION_URLS.contains(&e["url"].as_str().unwrap())).unwrap();
-        let bytes = base64::engine::general_purpose::STANDARD.decode(ext["valueAttachment"]["data"].as_str().unwrap()).unwrap();
+        let ext = out["extension"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| BOUNDARY_EXTENSION_URLS.contains(&e["url"].as_str().unwrap()))
+            .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(ext["valueAttachment"]["data"].as_str().unwrap())
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -859,7 +1049,9 @@ mod tests {
     }
 
     fn square(dx: f64) -> geo::Geometry<f64> {
-        geo::Geometry::Polygon(polygon![(x: 3.0 + dx, y: 6.0), (x: 4.0 + dx, y: 6.0), (x: 4.0 + dx, y: 7.0), (x: 3.0 + dx, y: 7.0), (x: 3.0 + dx, y: 6.0)])
+        geo::Geometry::Polygon(
+            polygon![(x: 3.0 + dx, y: 6.0), (x: 4.0 + dx, y: 6.0), (x: 4.0 + dx, y: 7.0), (x: 3.0 + dx, y: 7.0), (x: 3.0 + dx, y: 6.0)],
+        )
     }
 
     fn apply_geom(base: Value, r: &InputRow, report: &mut Report) -> Value {
@@ -871,20 +1063,37 @@ mod tests {
     fn an_unchanged_boundary_with_float_noise_is_not_an_edit() {
         let base = with_boundary(BOUNDARY_EXTENSION_URL, SQUARE);
         let mut report = Report::default();
-        let out = apply_geom(base.clone(), &geom_row(square(0.00000001), &[]), &mut report);
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(square(0.00000001), &[]),
+            &mut report,
+        );
         assert_eq!(out, base);
         assert!(report.counts().is_empty());
     }
 
     #[test]
     fn a_redrawn_boundary_replaces_the_attachment_and_keeps_the_extension_url() {
-        let base = with_boundary("http://hl7.org/fhir/StructureDefinition/location-boundary-geojson", SQUARE);
+        let base = with_boundary(
+            "http://hl7.org/fhir/StructureDefinition/location-boundary-geojson",
+            SQUARE,
+        );
         let mut report = Report::default();
-        let out = apply_geom(base, &geom_row(square(0.123456789), &[("name", text("B"))]), &mut report);
+        let out = apply_geom(
+            base,
+            &geom_row(square(0.123456789), &[("name", text("B"))]),
+            &mut report,
+        );
         assert_eq!(out["name"], "B");
         assert_eq!(out["extension"][0]["url"], "https://example.org/keep");
-        assert_eq!(out["extension"][1]["url"], "http://hl7.org/fhir/StructureDefinition/location-boundary-geojson");
-        assert_eq!(out["extension"][1]["valueAttachment"]["contentType"], "application/geo+json");
+        assert_eq!(
+            out["extension"][1]["url"],
+            "http://hl7.org/fhir/StructureDefinition/location-boundary-geojson"
+        );
+        assert_eq!(
+            out["extension"][1]["valueAttachment"]["contentType"],
+            "application/geo+json"
+        );
         let g = decoded_boundary(&out);
         assert_eq!(g["type"], "Polygon");
         assert_eq!(g["coordinates"][0][0][0], 3.1234568);
@@ -895,7 +1104,14 @@ mod tests {
     fn a_point_on_a_boundary_row_is_reported_and_other_edits_still_apply() {
         let base = with_boundary(BOUNDARY_EXTENSION_URL, SQUARE);
         let mut report = Report::default();
-        let out = apply_geom(base.clone(), &geom_row(geo::Geometry::Point(geo::Point::new(3.5, 6.5)), &[("name", text("B"))]), &mut report);
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(
+                geo::Geometry::Point(geo::Point::new(3.5, 6.5)),
+                &[("name", text("B"))],
+            ),
+            &mut report,
+        );
         assert_eq!(out["name"], "B");
         assert_eq!(out["extension"], base["extension"]);
         assert!(out.get("position").is_none());
@@ -906,10 +1122,24 @@ mod tests {
     fn a_moved_point_updates_the_position_and_an_equal_one_keeps_the_original_numbers() {
         let base = json!({"resourceType":"Location","id":"a","position":{"longitude":3.25,"latitude":6.25}});
         let mut report = Report::default();
-        let out = apply_geom(base.clone(), &geom_row(geo::Geometry::Point(geo::Point::new(3.3, 6.123456789)), &[]), &mut report);
-        assert_eq!(out["position"], json!({"longitude":3.3,"latitude":6.1234568}));
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(geo::Geometry::Point(geo::Point::new(3.3, 6.123456789)), &[]),
+            &mut report,
+        );
+        assert_eq!(
+            out["position"],
+            json!({"longitude":3.3,"latitude":6.1234568})
+        );
         assert!(out.get("extension").is_none());
-        let out = apply_geom(base.clone(), &geom_row(geo::Geometry::Point(geo::Point::new(3.250000004, 6.25)), &[]), &mut report);
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(
+                geo::Geometry::Point(geo::Point::new(3.250000004, 6.25)),
+                &[],
+            ),
+            &mut report,
+        );
         assert_eq!(out, base);
         assert!(report.counts().is_empty());
     }
@@ -918,24 +1148,46 @@ mod tests {
     fn when_position_columns_and_the_geometry_disagree_the_geometry_wins() {
         let base = json!({"resourceType":"Location","id":"a","position":{"longitude":3.25,"latitude":6.25}});
         let mut report = Report::default();
-        let cols = [("position_longitude", ColumnValue::Number(9.0)), ("position_latitude", ColumnValue::Number(9.0))];
-        let out = apply_geom(base.clone(), &geom_row(geo::Geometry::Point(geo::Point::new(3.25, 6.25)), &cols), &mut report);
-        assert_eq!(out, base, "geometry equal to the snapshot restores the original numbers");
+        let cols = [
+            ("position_longitude", ColumnValue::Number(9.0)),
+            ("position_latitude", ColumnValue::Number(9.0)),
+        ];
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(geo::Geometry::Point(geo::Point::new(3.25, 6.25)), &cols),
+            &mut report,
+        );
+        assert_eq!(
+            out, base,
+            "geometry equal to the snapshot restores the original numbers"
+        );
         assert_eq!(report.count("position_geometry_disagree"), 1);
-        let out = apply_geom(base.clone(), &geom_row(geo::Geometry::Point(geo::Point::new(4.0, 5.0)), &cols), &mut report);
+        let out = apply_geom(
+            base.clone(),
+            &geom_row(geo::Geometry::Point(geo::Point::new(4.0, 5.0)), &cols),
+            &mut report,
+        );
         assert_eq!(out["position"], json!({"longitude":4.0,"latitude":5.0}));
         assert_eq!(report.count("position_geometry_disagree"), 2);
 
         // Stale but unchanged columns next to a moved geometry: a plain move, no report.
-        let stale = [("position_longitude", ColumnValue::Number(3.25)), ("position_latitude", ColumnValue::Number(6.25))];
-        let out = apply_geom(base, &geom_row(geo::Geometry::Point(geo::Point::new(4.0, 5.0)), &stale), &mut report);
+        let stale = [
+            ("position_longitude", ColumnValue::Number(3.25)),
+            ("position_latitude", ColumnValue::Number(6.25)),
+        ];
+        let out = apply_geom(
+            base,
+            &geom_row(geo::Geometry::Point(geo::Point::new(4.0, 5.0)), &stale),
+            &mut report,
+        );
         assert_eq!(out["position"], json!({"longitude":4.0,"latitude":5.0}));
         assert_eq!(report.count("position_geometry_disagree"), 2);
     }
 
     #[test]
     fn a_polygon_on_a_point_row_adds_a_boundary() {
-        let base = json!({"resourceType":"Location","id":"a","position":{"longitude":3.5,"latitude":6.5}});
+        let base =
+            json!({"resourceType":"Location","id":"a","position":{"longitude":3.5,"latitude":6.5}});
         let mut report = Report::default();
         let out = apply_geom(base, &geom_row(square(0.0), &[]), &mut report);
         assert_eq!(out["position"], json!({"longitude":3.5,"latitude":6.5}));
@@ -953,7 +1205,9 @@ mod tests {
         assert!(out.get("extension").is_none());
         assert_eq!(report.count("geometry_unparseable"), 1);
 
-        let bowtie = geo::Geometry::Polygon(polygon![(x: 0.0, y: 0.0), (x: 2.0, y: 2.0), (x: 2.0, y: 0.0), (x: 0.0, y: 2.0), (x: 0.0, y: 0.0)]);
+        let bowtie = geo::Geometry::Polygon(
+            polygon![(x: 0.0, y: 0.0), (x: 2.0, y: 2.0), (x: 2.0, y: 0.0), (x: 0.0, y: 2.0), (x: 0.0, y: 0.0)],
+        );
         let out = apply_geom(base, &geom_row(bowtie, &[]), &mut report);
         assert_eq!(decoded_boundary(&out)["type"], "Polygon", "written as is");
         assert_eq!(report.count("geometry_invalid"), 1);

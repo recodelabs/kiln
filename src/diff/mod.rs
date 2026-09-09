@@ -67,11 +67,14 @@ pub struct DiffStats {
     pub organizations: usize,
 }
 
+/// Resource id → (byte offset, length) of its line in a snapshot file.
+type LineIndex = HashMap<String, (u64, usize)>;
+
 struct Diff<'a> {
-    index: HashMap<String, (u64, usize)>,
+    index: LineIndex,
     access: LineAccess,
     /// The Organization side of the facility pairing, when the snapshot has it.
-    organizations: Option<(HashMap<String, (u64, usize)>, LineAccess)>,
+    organizations: Option<(LineIndex, LineAccess)>,
     out: BufWriter<File>,
     out_path: &'a Path,
     seen: HashSet<String>,

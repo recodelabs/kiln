@@ -8,6 +8,8 @@ mod geometry;
 mod index;
 mod inspect;
 mod load;
+mod population;
+mod raster;
 mod report;
 mod run;
 mod snapshot;
@@ -26,6 +28,7 @@ fn main() {
         cli::Command::Diff(args) => diff::run_diff(&args),
         cli::Command::Load(args) => load::run_load(&args),
         cli::Command::Index(args) => cells::run_index(&args),
+        cli::Command::Population(args) => population::run_population(&args),
     };
     if let Err(err) = result {
         eprintln!("kiln: {err}");

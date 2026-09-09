@@ -49,7 +49,11 @@ pub fn feature_to_row(f: Feature, line: usize, report: &mut Report) -> InputRow 
         match convert(g) {
             Ok((geom, z_dropped)) => {
                 if z_dropped {
-                    report.add("boundary_z_dropped", &label, "3D coordinates flattened to 2D");
+                    report.add(
+                        "boundary_z_dropped",
+                        &label,
+                        "3D coordinates flattened to 2D",
+                    );
                 }
                 row.geometry = Some(geom);
             }
@@ -200,13 +204,29 @@ mod tests {
     #[test]
     fn id_comes_from_the_property_then_the_feature_id() {
         let mut r = Report::default();
-        let row = feature_to_row(feature(r#"{"type":"Feature","id":"f1","properties":{"id":"p1"},"geometry":null}"#), 1, &mut r);
+        let row = feature_to_row(
+            feature(r#"{"type":"Feature","id":"f1","properties":{"id":"p1"},"geometry":null}"#),
+            1,
+            &mut r,
+        );
         assert_eq!(row.id.as_deref(), Some("p1"));
-        let row = feature_to_row(feature(r#"{"type":"Feature","id":"f1","properties":{},"geometry":null}"#), 2, &mut r);
+        let row = feature_to_row(
+            feature(r#"{"type":"Feature","id":"f1","properties":{},"geometry":null}"#),
+            2,
+            &mut r,
+        );
         assert_eq!(row.id.as_deref(), Some("f1"));
-        let row = feature_to_row(feature(r#"{"type":"Feature","id":7,"properties":{"id":""},"geometry":null}"#), 3, &mut r);
+        let row = feature_to_row(
+            feature(r#"{"type":"Feature","id":7,"properties":{"id":""},"geometry":null}"#),
+            3,
+            &mut r,
+        );
         assert_eq!(row.id.as_deref(), Some("7"));
-        let row = feature_to_row(feature(r#"{"type":"Feature","properties":null,"geometry":null}"#), 4, &mut r);
+        let row = feature_to_row(
+            feature(r#"{"type":"Feature","properties":null,"geometry":null}"#),
+            4,
+            &mut r,
+        );
         assert_eq!(row.id, None);
         assert_eq!(row.line, 4);
     }
@@ -215,17 +235,28 @@ mod tests {
     fn writable_columns_are_kept_derived_ignored_bad_types_reported() {
         let mut r = Report::default();
         let row = feature_to_row(
-            feature(r#"{"type":"Feature","properties":{"id":"a","name":"N","admin1_name":"stale","alias":["x"],"position_latitude":"oops"},"geometry":{"type":"Point","coordinates":[3.25,6.25,10]}}"#),
+            feature(
+                r#"{"type":"Feature","properties":{"id":"a","name":"N","admin1_name":"stale","alias":["x"],"position_latitude":"oops"},"geometry":{"type":"Point","coordinates":[3.25,6.25,10]}}"#,
+            ),
             1,
             &mut r,
         );
-        assert_eq!(row.columns.get("name"), Some(&ColumnValue::Text("N".into())));
-        assert_eq!(row.columns.get("alias"), Some(&ColumnValue::TextList(vec!["x".into()])));
+        assert_eq!(
+            row.columns.get("name"),
+            Some(&ColumnValue::Text("N".into()))
+        );
+        assert_eq!(
+            row.columns.get("alias"),
+            Some(&ColumnValue::TextList(vec!["x".into()]))
+        );
         assert!(!row.columns.contains_key("admin1_name"));
         assert!(!row.columns.contains_key("position_latitude"));
         assert_eq!(r.count("input_column_type"), 1);
         assert_eq!(r.count("boundary_z_dropped"), 1);
-        assert_eq!(row.geometry, Some(geo::Geometry::Point(geo::Point::new(3.25, 6.25))));
+        assert_eq!(
+            row.geometry,
+            Some(geo::Geometry::Point(geo::Point::new(3.25, 6.25)))
+        );
     }
 
     #[test]
@@ -236,7 +267,10 @@ mod tests {
         let f = tmp(r#"{"type":"FeatureCollection","features":[
             {"type":"Feature","properties":{"id":"a"},"geometry":{"type":"Point","coordinates":[3.25]}}]}"#);
         let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
-        assert!(matches!(&err, KilnError::Usage(m) if m.contains("position")), "{err}");
+        assert!(
+            matches!(&err, KilnError::Usage(m) if m.contains("position")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -247,11 +281,24 @@ mod tests {
             {"type":"Feature","properties":{"id":"c"},"geometry":null}],"type":"FeatureCollection"}"#);
         let mut seen = Vec::new();
         read_feature_collection(f.path(), |feature, index| {
-            seen.push((index, feature.properties.unwrap()["id"].as_str().unwrap().to_string()));
+            seen.push((
+                index,
+                feature.properties.unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ));
             Ok(())
         })
         .unwrap();
-        assert_eq!(seen, vec![(1, "a".to_string()), (2, "b".to_string()), (3, "c".to_string())]);
+        assert_eq!(
+            seen,
+            vec![
+                (1, "a".to_string()),
+                (2, "b".to_string()),
+                (3, "c".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -273,9 +320,15 @@ mod tests {
     fn not_a_collection_is_a_usage_error() {
         let f = tmp(r#"{"type":"Feature","properties":{},"geometry":null}"#);
         let err = read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err();
-        assert!(matches!(&err, KilnError::Usage(m) if m.contains("FeatureCollection")), "{err}");
+        assert!(
+            matches!(&err, KilnError::Usage(m) if m.contains("FeatureCollection")),
+            "{err}"
+        );
         let f = tmp(r#"[1,2]"#);
-        assert!(matches!(read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err(), KilnError::Usage(_)));
+        assert!(matches!(
+            read_feature_collection(f.path(), |_, _| Ok(())).unwrap_err(),
+            KilnError::Usage(_)
+        ));
     }
 
     #[test]
@@ -283,13 +336,22 @@ mod tests {
         let f = tmp("{\"type\":\"Feature\",\"properties\":{\"id\":\"a\"},\"geometry\":null}\n\n{\"type\":\"Feature\",\"properties\":{\"id\":\"b\"},\"geometry\":null}\n");
         let mut seen = Vec::new();
         read_feature_lines(f.path(), |feature, index| {
-            seen.push((index, feature.properties.unwrap()["id"].as_str().unwrap().to_string()));
+            seen.push((
+                index,
+                feature.properties.unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            ));
             Ok(())
         })
         .unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[1], (2, "b".to_string()));
         let bad = tmp("{\"nope\":1}\n");
-        assert!(matches!(read_feature_lines(bad.path(), |_, _| Ok(())).unwrap_err(), KilnError::Usage(_)));
+        assert!(matches!(
+            read_feature_lines(bad.path(), |_, _| Ok(())).unwrap_err(),
+            KilnError::Usage(_)
+        ));
     }
 }

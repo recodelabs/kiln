@@ -100,7 +100,9 @@ pub fn run_extract(args: &ExtractArgs) -> Result<()> {
     } else if let Some(s) = &args.since {
         Some(s.clone())
     } else if snap.organizations().exists() {
-        state.as_ref().and_then(|st| st.organization_watermark.clone())
+        state
+            .as_ref()
+            .and_then(|st| st.organization_watermark.clone())
     } else {
         None
     };
@@ -244,7 +246,12 @@ fn run_phases(
     // 51,843 Locations, 2026-09-06); only then is the count worth a request.
     for (resource_type, snapshot_total, incremental, suspicious) in [
         ("Location", stats.total, !full, paged.last_page_full),
-        ("Organization", org_stats.total, org_since.is_some(), org_paged.last_page_full),
+        (
+            "Organization",
+            org_stats.total,
+            org_since.is_some(),
+            org_paged.last_page_full,
+        ),
     ] {
         if !incremental && !suspicious {
             continue;
@@ -267,7 +274,9 @@ fn run_phases(
                 report.add("count_mismatch", resource_type, &detail)
             }
             Some(_) => {}
-            None => eprintln!("count check unavailable for {resource_type}: the server returned no total"),
+            None => eprintln!(
+                "count check unavailable for {resource_type}: the server returned no total"
+            ),
         }
     }
 

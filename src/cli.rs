@@ -11,6 +11,9 @@ pub const DEFAULT_MAX_CONSECUTIVE_FAILURES: usize = 50;
 /// take minutes, and reqwest's blocking client has no per-read timeout.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 pub const DEFAULT_BATCH_SIZE: usize = 100;
+/// A country raster is 100–200 MB; the FHIR-paging default would cut a slow
+/// download off after five minutes. Total per-request deadline, in seconds.
+pub const DEFAULT_RASTER_TIMEOUT_SECS: u64 = 3600;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -39,6 +42,8 @@ pub enum Command {
     Load(LoadArgs),
     /// Backfill spatial-index cells (quadkey, geohash) onto snapshot Locations that lack them; writes the changed resources as FHIR NDJSON for `kiln load` (offline)
     Index(IndexArgs),
+    /// Population denominators: sum a WorldPop-style raster under every admin unit at one level, roll the sums up the hierarchy, and write ICRTargetPopulation Groups as FHIR NDJSON for `kiln load` (offline once the raster is cached)
+    Population(PopulationArgs),
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -58,6 +63,46 @@ pub struct IndexArgs {
     /// Also write the report as JSON to this file
     #[arg(long)]
     pub report: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct PopulationArgs {
+    /// Snapshot directory containing locations.ndjson
+    #[arg(long)]
+    pub snapshot: PathBuf,
+    /// GeoTIFF to sum: a local path, or an http(s) URL fetched once into the raster cache
+    #[arg(long)]
+    pub raster: String,
+    /// Admin level to measure from the raster (0 = country); every admin ancestor gets a rolled-up total
+    #[arg(long)]
+    pub level: u8,
+    /// Reference year of the raster; part of each Group's id and the default estimate-date
+    #[arg(long)]
+    pub year: u16,
+    /// Date the estimate was made (YYYY-MM-DD) for the estimate-date extension; defaults to YEAR-01-01, the raster's reference year
+    #[arg(long)]
+    pub estimate_date: Option<String>,
+    /// denominator-source code (icr-denominator-source-cs)
+    #[arg(long, default_value = "worldpop")]
+    pub source: String,
+    /// Mark every written Group as the planning denominator
+    #[arg(long)]
+    pub planning_denominator: bool,
+    /// Output NDJSON file of Group resources
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Also write the report as JSON to this file
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+    /// Raster cache directory (default: SNAPSHOT/rasters)
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
+    /// Attempts per HTTP request
+    #[arg(long, default_value_t = DEFAULT_RETRIES)]
+    pub retries: usize,
+    /// Total timeout for the raster download, in seconds
+    #[arg(long, default_value_t = DEFAULT_RASTER_TIMEOUT_SECS)]
+    pub timeout: u64,
 }
 
 #[derive(clap::Args, Debug, Clone)]

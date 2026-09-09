@@ -58,7 +58,11 @@ pub fn order_parents_first(resources: Vec<Value>) -> Result<Vec<Value>> {
         |i: usize| resources[i].get("resourceType").and_then(Value::as_str) == Some("Location");
     let mut keyed: Vec<(bool, usize, usize)> = Vec::with_capacity(resources.len());
     for i in 0..resources.len() {
-        keyed.push((is_location(i), depth(i, &resources, &by_id, &mut depths)?, i));
+        keyed.push((
+            is_location(i),
+            depth(i, &resources, &by_id, &mut depths)?,
+            i,
+        ));
     }
     keyed.sort_by_key(|&(l, d, i)| (l, d, i));
     let mut slots: Vec<Option<Value>> = resources.into_iter().map(Some).collect();
@@ -87,7 +91,12 @@ mod tests {
 
     #[test]
     fn children_come_after_their_ancestors() {
-        let input = vec![loc("clinic", Some("ward")), loc("ward", Some("state")), loc("state", None), loc("other", Some("state"))];
+        let input = vec![
+            loc("clinic", Some("ward")),
+            loc("ward", Some("state")),
+            loc("state", None),
+            loc("other", Some("state")),
+        ];
         let out = order_parents_first(input).unwrap();
         assert_eq!(ids(&out), vec!["state", "ward", "other", "clinic"]);
     }
@@ -103,7 +112,10 @@ mod tests {
     fn a_cycle_is_a_usage_error() {
         let input = vec![loc("a", Some("b")), loc("b", Some("a"))];
         let err = order_parents_first(input).unwrap_err();
-        assert!(matches!(&err, KilnError::Usage(m) if m.contains("cycle") && m.contains("Location/")), "{err}");
+        assert!(
+            matches!(&err, KilnError::Usage(m) if m.contains("cycle") && m.contains("Location/")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -119,7 +131,10 @@ mod tests {
 
     #[test]
     fn resources_without_part_of_or_of_other_types_are_roots() {
-        let input = vec![json!({"resourceType": "Organization", "id": "o"}), loc("a", Some("o"))];
+        let input = vec![
+            json!({"resourceType": "Organization", "id": "o"}),
+            loc("a", Some("o")),
+        ];
         let out = order_parents_first(input).unwrap();
         assert_eq!(ids(&out), vec!["o", "a"]);
     }

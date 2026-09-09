@@ -102,10 +102,19 @@ mod tests {
         let json = bundles[0].to_json();
         assert_eq!(json["resourceType"], "Bundle");
         assert_eq!(json["type"], "transaction");
-        assert_eq!(json["entry"][0]["request"], json!({"method": "PUT", "url": "Location/a", "ifMatch": "W/\"1\""}));
-        assert_eq!(json["entry"][1]["request"], json!({"method": "PUT", "url": "Location/b"}));
+        assert_eq!(
+            json["entry"][0]["request"],
+            json!({"method": "PUT", "url": "Location/a", "ifMatch": "W/\"1\""})
+        );
+        assert_eq!(
+            json["entry"][1]["request"],
+            json!({"method": "PUT", "url": "Location/b"})
+        );
         assert_eq!(json["entry"][0]["resource"]["id"], "a");
-        assert_eq!(bundles[1].to_json()["entry"][0]["request"]["url"], "Organization/o");
+        assert_eq!(
+            bundles[1].to_json()["entry"][0]["request"]["url"],
+            "Organization/o"
+        );
         assert_eq!(
             bundles[0].describe(),
             "Location/a update@1, Location/b create"

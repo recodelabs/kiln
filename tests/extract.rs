@@ -113,7 +113,10 @@ fn full_search() -> impl Matcher<Req> {
 /// Answers the `_summary=count` cross-check an incremental run makes, for
 /// both resource types, any number of times.
 fn expect_counts(server: &Server, locations: usize, organizations: usize) {
-    for (path, total) in [("/fhir/Location", locations), ("/fhir/Organization", organizations)] {
+    for (path, total) in [
+        ("/fhir/Location", locations),
+        ("/fhir/Organization", organizations),
+    ] {
         server.expect(
             Expectation::matching(all_of![
                 request::method_path("GET", path),
@@ -158,7 +161,7 @@ fn expect_no_organizations(server: &Server) {
             request::query(url_decoded(not(contains(key("_summary"))))),
         ])
         .times(0..)
-            .respond_with(ok(bundle(vec![], None))),
+        .respond_with(ok(bundle(vec![], None))),
     );
 }
 
@@ -1105,7 +1108,10 @@ fn organizations_are_paged_after_locations_with_their_own_watermark() {
     server.expect(
         Expectation::matching(full_search())
             .times(1)
-            .respond_with(ok(bundle(vec![loc("a", "2026-01-01T00:00:00Z", None)], None))),
+            .respond_with(ok(bundle(
+                vec![loc("a", "2026-01-01T00:00:00Z", None)],
+                None,
+            ))),
     );
     server.expect(
         Expectation::matching(all_of![
@@ -1114,13 +1120,23 @@ fn organizations_are_paged_after_locations_with_their_own_watermark() {
             request::query(url_decoded(not(contains(key("_summary"))))),
         ])
         .times(1)
-        .respond_with(ok(bundle(vec![org("org-a", "2026-02-01T00:00:00Z", "A")], None))),
+        .respond_with(ok(bundle(
+            vec![org("org-a", "2026-02-01T00:00:00Z", "A")],
+            None,
+        ))),
     );
     let a = extract(&server, snap.path(), &[]).success();
-    assert!(stdout(&a).contains("organizations: 1 resources, 1 new, 0 updated"), "{}", stdout(&a));
+    assert!(
+        stdout(&a).contains("organizations: 1 resources, 1 new, 0 updated"),
+        "{}",
+        stdout(&a)
+    );
     assert_eq!(org_lines(snap.path()).len(), 1);
     let st = state(snap.path());
-    assert_eq!(st["watermark"], "2026-01-01T00:00:00Z", "the Location watermark is its own");
+    assert_eq!(
+        st["watermark"], "2026-01-01T00:00:00Z",
+        "the Location watermark is its own"
+    );
     assert_eq!(st["organization_watermark"], "2026-02-01T00:00:00Z");
     assert_eq!(st["organization_count"], 1);
 
@@ -1133,13 +1149,19 @@ fn organizations_are_paged_after_locations_with_their_own_watermark() {
     server.expect(
         Expectation::matching(org_since_search("2026-02-01T00:00:00Z"))
             .times(1)
-            .respond_with(ok(bundle(vec![org("org-b", "2026-02-02T00:00:00Z", "B")], None))),
+            .respond_with(ok(bundle(
+                vec![org("org-b", "2026-02-02T00:00:00Z", "B")],
+                None,
+            ))),
     );
     extract(&server, snap.path(), &[]).success();
     let orgs = org_lines(snap.path());
     assert_eq!(orgs.len(), 2);
     assert_eq!(orgs[1]["id"], "org-b");
-    assert_eq!(state(snap.path())["organization_watermark"], "2026-02-02T00:00:00Z");
+    assert_eq!(
+        state(snap.path())["organization_watermark"],
+        "2026-02-02T00:00:00Z"
+    );
     assert_eq!(state(snap.path())["count"], 1);
 }
 
@@ -1149,7 +1171,11 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
     expect_counts(&server, 1, 1);
     let snap = tempfile::tempdir().unwrap();
     // A plan 2 snapshot: locations and a state file with no organization fields.
-    std::fs::write(snap.path().join("locations.ndjson"), format!("{}\n", loc("a", "2026-01-01T00:00:00Z", None))).unwrap();
+    std::fs::write(
+        snap.path().join("locations.ndjson"),
+        format!("{}\n", loc("a", "2026-01-01T00:00:00Z", None)),
+    )
+    .unwrap();
     std::fs::write(
         snap.path().join("state.json"),
         json!({"server": server.url("/fhir").to_string(), "watermark": "2026-01-01T00:00:00Z", "count": 1,
@@ -1168,11 +1194,17 @@ fn a_snapshot_without_organizations_fetches_them_in_full() {
             request::query(url_decoded(not(contains(key("_summary"))))),
         ])
         .times(1)
-        .respond_with(ok(bundle(vec![org("org-a", "2026-02-01T00:00:00Z", "A")], None))),
+        .respond_with(ok(bundle(
+            vec![org("org-a", "2026-02-01T00:00:00Z", "A")],
+            None,
+        ))),
     );
     extract(&server, snap.path(), &[]).success();
     assert_eq!(org_lines(snap.path()).len(), 1);
-    assert_eq!(state(snap.path())["organization_watermark"], "2026-02-01T00:00:00Z");
+    assert_eq!(
+        state(snap.path())["organization_watermark"],
+        "2026-02-01T00:00:00Z"
+    );
 }
 
 #[test]
@@ -1183,7 +1215,9 @@ fn a_full_last_page_with_no_next_link_is_cross_checked_against_the_count() {
     let server = Server::run();
     expect_no_organizations(&server);
     let snap = tempfile::tempdir().unwrap();
-    let page: Vec<Value> = (0..1000).map(|i| loc(&format!("l{i}"), "2026-01-01T00:00:00Z", None)).collect();
+    let page: Vec<Value> = (0..1000)
+        .map(|i| loc(&format!("l{i}"), "2026-01-01T00:00:00Z", None))
+        .collect();
     server.expect(
         Expectation::matching(full_search())
             .times(1)
@@ -1192,10 +1226,20 @@ fn a_full_last_page_with_no_next_link_is_cross_checked_against_the_count() {
     expect_counts(&server, 2500, 0);
     let out = stdout(&extract(&server, snap.path(), &[]).success());
     assert!(out.contains("count_mismatch: 1"), "{out}");
-    assert_eq!(lines(snap.path()).len(), 1000, "what was paged is still written");
-    let report: Value = serde_json::from_str(&std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap()).unwrap();
+    assert_eq!(
+        lines(snap.path()).len(),
+        1000,
+        "what was paged is still written"
+    );
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap(),
+    )
+    .unwrap();
     let detail = report["issues"][0]["detail"].as_str().unwrap();
-    assert!(detail.contains("reports 2500 Location resources") && detail.contains("paged 1000"), "{detail}");
+    assert!(
+        detail.contains("reports 2500 Location resources") && detail.contains("paged 1000"),
+        "{detail}"
+    );
 }
 
 #[test]
@@ -1207,12 +1251,18 @@ fn a_deletion_on_the_server_is_reported_by_the_count_check() {
         Expectation::matching(full_search())
             .times(1)
             .respond_with(ok(bundle(
-                vec![loc("a", "2026-01-01T00:00:00Z", None), loc("b", "2026-01-02T00:00:00Z", None)],
+                vec![
+                    loc("a", "2026-01-01T00:00:00Z", None),
+                    loc("b", "2026-01-02T00:00:00Z", None),
+                ],
                 None,
             ))),
     );
     let first = extract(&server, snap.path(), &[]).success();
-    assert!(!stdout(&first).contains("count_mismatch"), "a full run makes no count check");
+    assert!(
+        !stdout(&first).contains("count_mismatch"),
+        "a full run makes no count check"
+    );
 
     // "a" was deleted on the server; the incremental search cannot show that.
     server.expect(
@@ -1224,7 +1274,11 @@ fn a_deletion_on_the_server_is_reported_by_the_count_check() {
     let second = extract(&server, snap.path(), &[]).success();
     let out = stdout(&second);
     assert!(out.contains("count_mismatch: 1"), "{out}");
-    assert_eq!(lines(snap.path()).len(), 2, "the snapshot itself is untouched");
+    assert_eq!(
+        lines(snap.path()).len(),
+        2,
+        "the snapshot itself is untouched"
+    );
     let report: Value = serde_json::from_str(
         &std::fs::read_to_string(snap.path().join("_extract_report.json")).unwrap(),
     )
@@ -1232,5 +1286,8 @@ fn a_deletion_on_the_server_is_reported_by_the_count_check() {
     let issue = &report["issues"][0];
     assert_eq!(issue["kind"], "count_mismatch");
     assert_eq!(issue["location_id"], "Location");
-    assert!(issue["detail"].as_str().unwrap().contains("--full"), "{issue}");
+    assert!(
+        issue["detail"].as_str().unwrap().contains("--full"),
+        "{issue}"
+    );
 }

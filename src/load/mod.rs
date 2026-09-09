@@ -39,10 +39,10 @@ pub fn read_resources(path: &Path) -> Result<Vec<Value>> {
             (Some(t), Some(i)) if !t.is_empty() && !i.is_empty() => format!("{t}/{i}"),
             _ => {
                 return Err(KilnError::Usage(format!(
-                    "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
-                    path.display(),
-                    line.number
-                )))
+                "{}: line {}: not a FHIR resource (needs a resourceType and a non-empty string id)",
+                path.display(),
+                line.number
+            )))
             }
         };
         if !seen.insert(key.clone()) {
@@ -85,7 +85,12 @@ fn probe_conflicts(client: &FhirClient, base: &str, bundle: &Bundle) -> Vec<Stri
             Ok(fetched) => {
                 let actual = serde_json::from_slice::<Value>(&fetched.body)
                     .ok()
-                    .and_then(|v| v.get("meta")?.get("versionId")?.as_str().map(str::to_string));
+                    .and_then(|v| {
+                        v.get("meta")?
+                            .get("versionId")?
+                            .as_str()
+                            .map(str::to_string)
+                    });
                 match actual {
                     Some(a) if &a == expected => {}
                     Some(a) => out.push(format!(
@@ -146,8 +151,8 @@ pub fn run_load(args: &LoadArgs) -> Result<()> {
         })?,
         Err(e) => {
             return Err(KilnError::Environment(format!(
-                "capability preflight failed: {e} for {metadata_url}; check the server URL and token"
-            )))
+            "capability preflight failed: {e} for {metadata_url}; check the server URL and token"
+        )))
         }
     };
     let unstated = check_update_create(&capability, &creates)?;

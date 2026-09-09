@@ -141,13 +141,14 @@ pub fn write_dataset(
     recover_incomplete_swap(&dataset, &backup, &staging)?;
     std::fs::create_dir(&staging).map_err(|e| KilnError::io(&staging, e))?;
 
-    let written = match write_partitions(ndjson, index, &staging, keys, row_group_size, organizations) {
-        Ok(w) => w,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e);
-        }
-    };
+    let written =
+        match write_partitions(ndjson, index, &staging, keys, row_group_size, organizations) {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
     swap_in(&dataset, &backup, &staging)?;
     // Durability: fsync the directory whose entry (the `locations` rename)
     // just changed, so that change survives a crash right after this
@@ -324,9 +325,10 @@ fn write_partitions(
                 geometry_types.push(type_name.to_string());
             }
 
-            let (quadkey, quadkey_level) = crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells)
-                .map(|c| (Some(c.cell.clone()), Some(c.level as i32)))
-                .unwrap_or((None, None));
+            let (quadkey, quadkey_level) =
+                crate::fhir::spatial::deepest_quadkey(&loc.spatial_cells)
+                    .map(|c| (Some(c.cell.clone()), Some(c.level as i32)))
+                    .unwrap_or((None, None));
             let row = OutputRow {
                 id: loc.id,
                 version_id: loc.version_id.clone(),
@@ -514,7 +516,8 @@ mod tests {
         .unwrap();
         let mut index = build_index(snapshot.path(), None).unwrap();
         let keys = parse_keys("country,geom_type").unwrap();
-        let written = write_dataset(snapshot.path(), &mut index, out.path(), &keys, 3, None).unwrap();
+        let written =
+            write_dataset(snapshot.path(), &mut index, out.path(), &keys, 3, None).unwrap();
         assert!(written.is_empty());
         assert!(out.path().join("locations").is_dir());
     }
