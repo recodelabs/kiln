@@ -406,6 +406,180 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::index::hierarchy::resolve_hierarchy;
+    use base64::Engine;
+    use serde_json::{json, Value};
+
+    /// Writes each resource to its own line of a temp `locations.ndjson`,
+    /// re-reads it with the same `NdjsonReader` pass two uses to get every
+    /// line's offset/len, and builds one `IndexRecord` per line plus the
+    /// `LineAccess` `measure` reads through. The `NamedTempFile` must be
+    /// returned and kept alive by the caller: `LineAccess` reopens the path
+    /// itself, so the file must still be on disk.
+    fn index_ndjson(lines: &[Value]) -> (tempfile::NamedTempFile, LineAccess, Vec<IndexRecord>) {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for v in lines {
+            writeln!(tmp, "{v}").unwrap();
+        }
+        let path = tmp.path().to_path_buf();
+        let records: Vec<IndexRecord> = crate::fhir::ndjson::NdjsonReader::open(&path)
+            .unwrap()
+            .map(|l| l.unwrap())
+            .zip(lines)
+            .map(|(line, v)| IndexRecord {
+                id: v
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                offset: line.offset,
+                len: line.len,
+                ..IndexRecord::default()
+            })
+            .collect();
+        let access = LineAccess::open(&path).unwrap();
+        (tmp, access, records)
+    }
+
+    fn admin_loc(id: &str, boundary: Option<Value>) -> Value {
+        let mut r = json!({
+            "resourceType": "Location",
+            "id": id,
+            "type": [{"coding": [{"code": "admin-unit"}]}],
+        });
+        if let Some(ext) = boundary {
+            r["extension"] = json!([ext]);
+        }
+        r
+    }
+
+    fn boundary_ext(data: Option<&str>, url: Option<&str>) -> Value {
+        let mut att = json!({"contentType": "application/geo+json"});
+        if let Some(d) = data {
+            att["data"] = json!(d);
+        }
+        if let Some(u) = url {
+            att["url"] = json!(u);
+        }
+        json!({
+            "url": "https://icr.healthcampaigns.org/StructureDefinition/location-boundary-geojson",
+            "valueAttachment": att
+        })
+    }
+
+    fn rect_geojson(x0: f64, y0: f64, x1: f64, y1: f64) -> String {
+        format!(
+            r#"{{"type":"Polygon","coordinates":[[[{x0},{y0}],[{x1},{y0}],[{x1},{y1}],[{x0},{y1}],[{x0},{y0}]]]}}"#
+        )
+    }
+
+    #[test]
+    fn measure_reports_each_way_a_unit_can_be_unmeasurable() {
+        let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+
+        // A real boundary measures cleanly: no report entries at all.
+        {
+            let square = rect_geojson(3.0, 6.5, 3.5, 7.0);
+            let loc = admin_loc("a", Some(boundary_ext(Some(&b64(&square)), None)));
+            let (_tmp, mut lines, records) = index_ndjson(&[loc]);
+            let mut raster = crate::raster::MemRaster::fixture();
+            let mut report = Report::default();
+            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            assert_eq!(
+                got,
+                Some(ZonalSum {
+                    sum: 5074.0,
+                    pixels: 24
+                })
+            );
+            assert_eq!(report.counts().len(), 0);
+        }
+
+        // No boundary extension at all.
+        {
+            let loc = admin_loc("a", None);
+            let (_tmp, mut lines, records) = index_ndjson(&[loc]);
+            let mut raster = crate::raster::MemRaster::fixture();
+            let mut report = Report::default();
+            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            assert_eq!(got, None);
+            assert_eq!(report.count("no_boundary"), 1);
+            assert!(
+                report.issues[0].detail.contains("no boundary"),
+                "{}",
+                report.issues[0].detail
+            );
+        }
+
+        // valueAttachment.url instead of data: not yet inlined by extract.
+        {
+            let loc = admin_loc(
+                "a",
+                Some(boundary_ext(None, Some("https://files/x.geojson"))),
+            );
+            let (_tmp, mut lines, records) = index_ndjson(&[loc]);
+            let mut raster = crate::raster::MemRaster::fixture();
+            let mut report = Report::default();
+            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            assert_eq!(got, None);
+            assert_eq!(report.count("no_boundary"), 1);
+            assert!(
+                report.issues[0].detail.contains("unresolved url"),
+                "{}",
+                report.issues[0].detail
+            );
+        }
+
+        // data is base64 of something that is not GeoJSON at all.
+        {
+            let loc = admin_loc("a", Some(boundary_ext(Some(&b64("not json")), None)));
+            let (_tmp, mut lines, records) = index_ndjson(&[loc]);
+            let mut raster = crate::raster::MemRaster::fixture();
+            let mut report = Report::default();
+            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            assert_eq!(got, None);
+            assert_eq!(report.count("no_boundary"), 1);
+            assert!(
+                report.issues[0].detail.contains("did not parse"),
+                "{}",
+                report.issues[0].detail
+            );
+        }
+
+        // A Point boundary parses as GeoJSON but has no area to measure.
+        {
+            let point = r#"{"type":"Point","coordinates":[3.2,6.8]}"#;
+            let loc = admin_loc("a", Some(boundary_ext(Some(&b64(point)), None)));
+            let (_tmp, mut lines, records) = index_ndjson(&[loc]);
+            let mut raster = crate::raster::MemRaster::fixture();
+            let mut report = Report::default();
+            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            assert_eq!(got, None);
+            assert_eq!(report.count("no_boundary"), 1);
+            assert!(
+                report.issues[0].detail.contains("not a Polygon"),
+                "{}",
+                report.issues[0].detail
+            );
+        }
+
+        // The line is not a Location at all.
+        {
+            let org = json!({"resourceType": "Organization", "id": "o"});
+            let (_tmp, mut lines, records) = index_ndjson(&[org]);
+            let mut raster = crate::raster::MemRaster::fixture();
+            let mut report = Report::default();
+            let got = measure(&mut lines, &records[0], &mut raster, &mut report).unwrap();
+            assert_eq!(got, None);
+            assert_eq!(report.count("no_boundary"), 1);
+            assert!(
+                report.issues[0]
+                    .detail
+                    .contains("did not parse as a Location"),
+                "{}",
+                report.issues[0].detail
+            );
+        }
+    }
 
     fn admin(id: &str, part_of: Option<&str>) -> IndexRecord {
         IndexRecord {
