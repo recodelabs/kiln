@@ -79,6 +79,9 @@ pub struct PopulationArgs {
     /// Year the raster estimates; becomes each Group's estimate-date and part of its id
     #[arg(long)]
     pub year: u16,
+    /// Date the estimate was made (YYYY-MM-DD) for the estimate-date extension; defaults to YEAR-01-01, the raster's reference year
+    #[arg(long)]
+    pub estimate_date: Option<String>,
     /// denominator-source code (icr-denominator-source-cs)
     #[arg(long, default_value = "worldpop")]
     pub source: String,

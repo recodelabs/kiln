@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use crate::cli::PopulationArgs;
 use crate::error::{KilnError, Result};
-use crate::fhir::group::{group_id, target_population_group, TargetPopulation, MAX_ID_LEN};
+use crate::fhir::group::{
+    group_id, is_valid_id, target_population_group, TargetPopulation, MAX_ID_LEN, MAX_QUANTITY,
+};
 use crate::fhir::ndjson::LineAccess;
 use crate::fhir::{Boundary, Location};
 use crate::geometry::parse_boundary;
@@ -145,6 +147,23 @@ fn valid_source_code(code: &str) -> bool {
     !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// `YYYY-MM-DD`: 10 chars, digits at 0-3, 5-6, 8-9, hyphens at 4 and 7. Not a
+/// calendar check (no month/day range validation) -- just the shape the
+/// `estimate-date` extension's `valueDate` needs.
+fn valid_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter().enumerate().all(|(i, &c)| {
+            if i == 4 || i == 7 {
+                true
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
+
 pub fn run_population(args: &PopulationArgs) -> Result<()> {
     let snapshot = Snapshot::new(&args.snapshot);
     let ndjson = snapshot.locations();
@@ -166,6 +185,23 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             args.source
         )));
     }
+    if !(1900..=2100).contains(&args.year) {
+        return Err(KilnError::Usage(format!(
+            "--year {} is outside 1900–2100",
+            args.year
+        )));
+    }
+    if let Some(d) = &args.estimate_date {
+        if !valid_iso_date(d) {
+            return Err(KilnError::Usage(format!(
+                "--estimate-date must be YYYY-MM-DD, got {d:?}"
+            )));
+        }
+    }
+    let estimate_date = args
+        .estimate_date
+        .clone()
+        .unwrap_or_else(|| format!("{:04}-01-01", args.year));
 
     let index = build_index(&ndjson, None)?;
     let mut report = index.report;
@@ -252,21 +288,38 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
             );
         }
         let id = group_id(&args.source, args.year, &rec.id);
-        if id.len() > MAX_ID_LEN {
+        if !is_valid_id(&id) {
+            let kind = if id.len() > MAX_ID_LEN {
+                "group_id_too_long"
+            } else {
+                "group_id_invalid"
+            };
             report.add(
-                "group_id_too_long",
+                kind,
                 &rec.id,
-                &format!("{id} exceeds {MAX_ID_LEN} characters; no Group written"),
+                &format!(
+                    "{id:?} is not a valid FHIR id ([A-Za-z0-9.-], 1–64 chars); no Group written"
+                ),
+            );
+            continue;
+        }
+        let count = t.sum.round();
+        if !(count >= 0.0 && count <= MAX_QUANTITY as f64) {
+            report.add(
+                "quantity_out_of_range",
+                &rec.id,
+                &format!("{count} exceeds FHIR unsignedInt; no Group written"),
             );
             continue;
         }
         let group = target_population_group(&TargetPopulation {
             location_id: &rec.id,
             location_name: rec.name.as_deref(),
-            count: t.sum.round() as u64,
+            count: count as u64,
             year: args.year,
             source_code: &args.source,
             source_text: &source_text,
+            estimate_date: &estimate_date,
             calculated: t.calculated,
             planning_denominator: args.planning_denominator,
         });
@@ -285,8 +338,7 @@ pub fn run_population(args: &PopulationArgs) -> Result<()> {
     let assigned: f64 = totals
         .values()
         .filter(|t| !t.calculated)
-        .map(|t| t.sum)
-        .sum();
+        .fold(0.0_f64, |acc, t| acc + t.sum);
     let share = if grand.sum > 0.0 {
         100.0 * assigned / grand.sum
     } else {
@@ -383,5 +435,14 @@ mod tests {
         assert!(
             !valid_source_code("") && !valid_source_code("world pop") && !valid_source_code("a/b")
         );
+    }
+
+    #[test]
+    fn iso_dates_are_shape_checked() {
+        assert!(valid_iso_date("2026-01-01"));
+        assert!(!valid_iso_date("2026-1-1"));
+        assert!(!valid_iso_date("20260101"));
+        assert!(!valid_iso_date("2026-01-01T00:00:00Z"));
+        assert!(!valid_iso_date(""));
     }
 }
