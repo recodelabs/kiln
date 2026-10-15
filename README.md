@@ -1,5 +1,18 @@
 # kiln
 
+> **kiln is now part of [fhir-pipes](https://github.com/ohs-foundation/fhir-pipes-rs), and
+> this repository is archived.** Every kiln command is there under the same name
+> (`fhir-pipes run`, `extract`, `inspect`, `diff`, `load`, `index`, `population`,
+> `dhis2`, `export`), except `kiln transform`, which is `fhir-pipes transform locations`.
+> `KILN_*` environment variables are `FHIR_PIPES_*`, and a snapshot written by kiln is read
+> unchanged. The Location documentation is
+> [docs/locations.md](https://github.com/ohs-foundation/fhir-pipes-rs/blob/main/docs/locations.md).
+>
+> ```sh
+> cargo install --git https://github.com/ohs-foundation/fhir-pipes-rs --locked fhir-pipes
+> ```
+
+
 **A bridge between a FHIR Location registry and modern GIS tools.**
 
 kiln turns the `Location` resources in a FHIR server into a GeoParquet dataset
